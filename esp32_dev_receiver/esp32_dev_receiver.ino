@@ -1,11 +1,25 @@
 /*
  * ESP32-Dev Image Receiver via NRF24L01+
  * Receives image chunks and reassembles them
+ * Uploads received images to web server
  */
 
 #include <SPI.h>
 #include <RF24.h>
 #include <SPIFFS.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// WiFi Configuration
+const char* ssid = "heyguyswhatsup";          // Change this
+const char* password = "myroommatesarecool";  // Change this
+
+// Web Server Configuration
+const char* serverUrl = "http://192.168.0.198:5000/upload";  // Change this to your server
+// Examples:
+// Local server: "http://192.168.1.100:5000/upload"
+// Cloud server: "https://yourserver.com/api/upload"
+// Python Flask default: "http://192.168.1.100:5000/upload"
 
 // NRF24L01 Configuration
 #define CE_PIN 4    // Adjust based on your wiring
@@ -46,6 +60,24 @@ void setup() {
     while (1);
   }
   Serial.println("SPIFFS initialized");
+
+  // Connect to WiFi
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(ssid, password);
+  int wifiAttempts = 0;
+  while (WiFi.status() != WL_CONNECTED && wifiAttempts < 20) {
+    delay(500);
+    Serial.print(".");
+    wifiAttempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi connection failed! Will save images locally only.");
+  }
 
   // Initialize NRF24
   if (!radio.begin()) {
@@ -152,7 +184,18 @@ void handleDataPacket(Packet& packet) {
 }
 
 void handleEndPacket(Packet& packet) {
-  if (!receivingImage) {
+  if
+    // Upload to web server
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nUploading to web server...");
+      if (uploadImageToServer("/received_image.jpg")) {
+        Serial.println("Upload successful!");
+      } else {
+        Serial.println("Upload failed!");
+      }
+    } else {
+      Serial.println("WiFi not connected. Image saved locally only.");
+    }
     Serial.println("Received END packet but not in receiving mode!");
     return;
   }
@@ -176,7 +219,56 @@ void handleEndPacket(Packet& packet) {
   receivingImage = false;
 }
 
-void resetReceiver() {
+void resetReceiupload image to web server
+bool uploadImageToServer(const char* filepath) {
+  File file = SPIFFS.open(filepath, FILE_READ);
+  if (!file) {
+    Serial.println("Failed to open file for upload");
+    return false;
+  }
+  
+  size_t fileSize = file.size();
+  Serial.printf("Uploading %d bytes...\n", fileSize);
+  
+  HTTPClient http;
+  http.begin(serverUrl);
+  
+  // Set content type for JPEG image
+  http.addHeader("Content-Type", "image/jpeg");
+  // Optional: Add custom headers
+  http.addHeader("X-Device-ID", "ESP32-Receiver");
+  http.addHeader("X-Timestamp", String(millis()));
+  
+  // Read file into buffer and send
+  uint8_t* buffer = (uint8_t*)malloc(fileSize);
+  if (!buffer) {
+    Serial.println("Failed to allocate buffer");
+    file.close();
+    return false;
+  }
+  
+  file.read(buffer, fileSize);
+  file.close();
+  
+  // Send POST request
+  int httpResponseCode = http.POST(buffer, fileSize);
+  
+  free(buffer);
+  
+  if (httpResponseCode > 0) {
+    Serial.printf("HTTP Response code: %d\n", httpResponseCode);
+    String response = http.getString();
+    Serial.println("Server response: " + response);
+    http.end();
+    return (httpResponseCode == 200 || httpResponseCode == 201);
+  } else {
+    Serial.printf("HTTP Error: %s\n", http.errorToString(httpResponseCode).c_str());
+    http.end();
+    return false;
+  }
+}
+
+// Function to ver() {
   if (receivingImage && imageFile) {
     imageFile.close();
   }

@@ -189,10 +189,12 @@ bool handleDataPacket(Packet& packet) {
     return false;
   }
   
-  // Verify packet sequence
+  // Verify packet sequence - CRITICAL for image integrity
   if (packet.packetNumber != expectedPacket) {
-    Serial.printf("❌ Packet mismatch! Expected %d, got %d - sending NACK\n", expectedPacket, packet.packetNumber);
-    return false;  // Send NACK
+    Serial.printf("❌ PACKET ORDER ERROR! Expected %d, got %d - REJECTING\n", 
+                  expectedPacket, packet.packetNumber);
+    // DO NOT increment expectedPacket - we need THIS packet
+    return false;  // Send NACK to request correct packet
   }
   
   // Verify data length is valid
@@ -204,7 +206,8 @@ bool handleDataPacket(Packet& packet) {
   // Write data to file
   size_t written = imageFile.write(packet.data, packet.dataLength);
   if (written != packet.dataLength) {
-    Serial.printf("❌ Write error! Expected %d, wrote %d - sending NACK\n", packet.dataLength, written);
+    Serial.printf("❌ Write error! Expected %d, wrote %d - sending NACK\n", 
+                  packet.dataLength, written);
     return false;  // Send NACK
   }
   
@@ -213,7 +216,8 @@ bool handleDataPacket(Packet& packet) {
   
   // Print progress every 50 packets
   if (expectedPacket % 50 == 0) {
-    Serial.printf("✓ Progress: %d/%d packets, %d bytes\n", expectedPacket - 1, totalPackets, totalBytesReceived);
+    Serial.printf("✓ Progress: %d/%d packets, %d bytes\n", 
+                  expectedPacket - 1, totalPackets, totalBytesReceived);
   }
   
   return true;  // Send ACK
@@ -242,10 +246,31 @@ void handleEndPacket(Packet& packet) {
       uint8_t header[2];
       file.read(header, 2);
       if (header[0] == 0xFF && header[1] == 0xD8) {
-        Serial.println("✓ Valid JPEG header detected");
+        Serial.println("✓ Valid JPEG header (FF D8)");
       } else {
         Serial.printf("❌ Invalid JPEG header: 0x%02X 0x%02X (expected FF D8)\n", header[0], header[1]);
       }
+      
+      // Check JPEG footer (should end with FF D9)
+      if (file.size() >= 2) {
+        file.seek(file.size() - 2);
+        uint8_t footer[2];
+        file.read(footer, 2);
+        if (footer[0] == 0xFF && footer[1] == 0xD9) {
+          Serial.println("✓ Valid JPEG footer (FF D9)");
+        } else {
+          Serial.printf("❌ Invalid JPEG footer: 0x%02X 0x%02X (expected FF D9)\n", footer[0], footer[1]);
+          Serial.println("⚠️  Image may be incomplete or corrupted!");
+        }
+      }
+      
+      // Print first 16 bytes for debugging
+      file.seek(0);
+      Serial.print("First 16 bytes: ");
+      for (int i = 0; i < 16 && i < file.size(); i++) {
+        Serial.printf("%02X ", file.read());
+      }
+      Serial.println();
     }
     
     file.close();

@@ -9,6 +9,12 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 
+//function prorotypes
+bool initCamera();
+bool sendImage(uint8_t* imageData, size_t imageSize);
+bool sendPacketWithRetry(Packet& packet);
+
+
 // NRF24L01 Configuration
 #define CE_PIN 4    // Adjust based on your wiring
 #define CSN_PIN 5   // Adjust based on your wiring

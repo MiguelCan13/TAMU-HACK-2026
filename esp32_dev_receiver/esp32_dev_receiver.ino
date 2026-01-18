@@ -10,6 +10,12 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
+//function prototypes
+void handlePacket(Packet& packet);
+void handleStartPacket(Packet& packet);
+void handleDataPacket(Packet& packet);
+void handleEndPacket(Packet& packet);
+
 // WiFi Configuration
 const char* ssid = "YOUR_WIFI_SSID";          // Change this
 const char* password = "YOUR_WIFI_PASSWORD";  // Change this
@@ -110,6 +116,12 @@ void loop() {
     
     handlePacket(packet);
   }
+  //dont move on until a packet is recieved, will require 2 way transmission 
+  while (!radio.available()) {
+    delay(1);
+  }
+  
+  
 }
 
 void handlePacket(Packet& packet) {

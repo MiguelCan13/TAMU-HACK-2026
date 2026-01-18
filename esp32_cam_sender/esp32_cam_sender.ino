@@ -9,15 +9,9 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 
-//function prorotypes
-bool initCamera();
-bool sendImage(uint8_t* imageData, size_t imageSize);
-bool sendPacketWithRetry(Packet& packet);
-
-
 // NRF24L01 Configuration
-#define CE_PIN 4    // Adjust based on your wiring
-#define CSN_PIN 5   // Adjust based on your wiring
+#define CE_PIN 2    // Adjust based on your wiring
+#define CSN_PIN 15   // Adjust based on your wiring
 RF24 radio(CE_PIN, CSN_PIN);
 
 const byte address[6] = "00001";  // Communication address
@@ -34,6 +28,12 @@ struct Packet {
   uint8_t dataLength;      // Actual data length in this packet
   uint8_t data[PAYLOAD_SIZE];
 };
+
+//function prorotypes
+bool initCamera();
+bool sendImage(uint8_t* imageData, size_t imageSize);
+bool sendPacketWithRetry(Packet& packet);
+bool sendPacketWithRetry(Packet& packet);
 
 // ESP32-CAM AI-Thinker pin definitions
 #define PWDN_GPIO_NUM     32
@@ -68,6 +68,7 @@ void setup() {
   Serial.println("Camera initialized");
 
   // Initialize NRF24
+  SPI.begin(14, 12, 13, 15);
   if (!radio.begin()) {
     Serial.println("NRF24 initialization failed!");
     Serial.println("Check wiring and power supply!");

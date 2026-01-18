@@ -26,7 +26,8 @@ const char* serverUrl = "http://192.168.0.198:5000/upload";  // Change this to y
 #define CSN_PIN 10   // Adjust based on your wiring
 RF24 radio(CE_PIN, CSN_PIN);
 
-const byte address[6] = "00001";  // Must match sender
+const byte address[6] = "00001";  // Must match sender - receive data on this
+const byte ackAddress[6] = "00002";  // Send ACKs on this
 
 // Packet structure (must match sender)
 #define PACKET_SIZE 32
@@ -51,7 +52,7 @@ struct AckPacket {
 //function prototypes
 void handlePacket(Packet& packet);
 void handleStartPacket(Packet& packet);
-void handleDataPacket(Packet& packet);
+bool handleDataPacket(Packet& packet);
 void handleEndPacket(Packet& packet);
 void resetReceiver();
 bool uploadImageToServer(const char* filepath);
@@ -105,11 +106,13 @@ void setup() {
   radio.setPALevel(RF24_PA_MAX);
   radio.setDataRate(RF24_250KBPS);
   radio.setChannel(108);
-  radio.openWritingPipe(address);        // For sending ACKs
-  radio.openReadingPipe(1, address);     // For receiving data
+  radio.openWritingPipe(ackAddress);     // Write ACKs on pipe "00002"
+  radio.openReadingPipe(1, address);     // Read data on pipe "00001"
   radio.startListening();
   
   Serial.println("NRF24 initialized with ACK support");
+  Serial.println("  RX pipe: 00001 (data)");
+  Serial.println("  TX pipe: 00002 (ACKs)");
   Serial.println("Waiting for images...");
 }
 

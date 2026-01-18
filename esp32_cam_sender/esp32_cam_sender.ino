@@ -15,6 +15,7 @@
 RF24 radio(CE_PIN, CSN_PIN);
 
 const byte address[6] = "00001";  // Communication address
+const byte ackAddress[6] = "00002";  // ACK return address
 
 // Packet structure
 #define PACKET_SIZE 32
@@ -84,8 +85,8 @@ void setup() {
   radio.setPALevel(RF24_PA_MAX);
   radio.setDataRate(RF24_250KBPS);  // Slower but more reliable
   radio.setChannel(108);
-  radio.openWritingPipe(address);
-  radio.openReadingPipe(1, address);  // Open reading pipe for ACKs
+  radio.openWritingPipe(address);      // Write data on pipe "00001"
+  radio.openReadingPipe(1, ackAddress); // Read ACKs on pipe "00002"
   radio.stopListening();  // Start in TX mode
   
   Serial.println("NRF24 initialized");
@@ -100,6 +101,8 @@ void setup() {
   Serial.println(radio.getPALevel());
   Serial.print("Is Chip Connected: ");
   Serial.println(radio.isChipConnected() ? "YES" : "NO");
+  Serial.println("TX pipe: 00001 (data)");
+  Serial.println("RX pipe: 00002 (ACKs)");
   Serial.println("==========================\n");
   
   Serial.println("System ready!");

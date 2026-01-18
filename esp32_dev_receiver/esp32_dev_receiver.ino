@@ -268,7 +268,7 @@ bool uploadImageToServer(const char* filepath) {
   }
 }
 
-// Function to ver() {
+Function to ver() {
   if (receivingImage && imageFile) {
     imageFile.close();
   }

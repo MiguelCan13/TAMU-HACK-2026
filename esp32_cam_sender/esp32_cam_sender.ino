@@ -121,6 +121,21 @@ void loop() {
   
   Serial.printf("Image captured: %d bytes, %dx%d\n", fb->len, fb->width, fb->height);
   
+  // Validate JPEG before sending
+  if (fb->len >= 4) {
+    Serial.printf("JPEG Header: 0x%02X 0x%02X (should be FF D8)\n", fb->buf[0], fb->buf[1]);
+    Serial.printf("JPEG Footer: 0x%02X 0x%02X (should be FF D9)\n", 
+                  fb->buf[fb->len - 2], fb->buf[fb->len - 1]);
+    
+    if (fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
+      Serial.println("❌ WARNING: Camera produced invalid JPEG header!");
+    }
+    if (fb->buf[fb->len - 2] != 0xFF || fb->buf[fb->len - 1] != 0xD9) {
+      Serial.println("❌ WARNING: Camera produced invalid JPEG footer!");
+      Serial.println("This may indicate incomplete image capture.");
+    }
+  }
+  
   // Send image
   bool success = sendImage(fb->buf, fb->len);
   

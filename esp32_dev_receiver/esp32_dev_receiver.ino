@@ -11,11 +11,11 @@
 #include <HTTPClient.h>
 
 // WiFi Configuration
-const char* ssid = "heyguyswhatsup";          // Change this
-const char* password = "myroommatesarecool";  // Change this
+const char* ssid = "YOUR_WIFI_SSID";          // Change this
+const char* password = "YOUR_WIFI_PASSWORD";  // Change this
 
 // Web Server Configuration
-const char* serverUrl = "http://192.168.0.198:5000/upload";  // Change this to your server
+const char* serverUrl = "http://192.168.1.100:5000/upload";  // Change this to your server
 // Examples:
 // Local server: "http://192.168.1.100:5000/upload"
 // Cloud server: "https://yourserver.com/api/upload"
@@ -184,18 +184,7 @@ void handleDataPacket(Packet& packet) {
 }
 
 void handleEndPacket(Packet& packet) {
-  if
-    // Upload to web server
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nUploading to web server...");
-      if (uploadImageToServer("/received_image.jpg")) {
-        Serial.println("Upload successful!");
-      } else {
-        Serial.println("Upload failed!");
-      }
-    } else {
-      Serial.println("WiFi not connected. Image saved locally only.");
-    }
+  if (!receivingImage) {
     Serial.println("Received END packet but not in receiving mode!");
     return;
   }
@@ -213,13 +202,35 @@ void handleEndPacket(Packet& packet) {
     file.close();
     
     Serial.println("Image saved as: /received_image.jpg");
-    Serial.println("You can now retrieve it via Serial or SD card");
+    
+    // Upload to web server
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nUploading to web server...");
+      if (uploadImageToServer("/received_image.jpg")) {
+        Serial.println("Upload successful!");
+      } else {
+        Serial.println("Upload failed!");
+      }
+    } else {
+      Serial.println("WiFi not connected. Image saved locally only.");
+    }
   }
   
   receivingImage = false;
 }
 
-void resetReceiupload image to web server
+void resetReceiver() {
+  if (receivingImage && imageFile) {
+    imageFile.close();
+  }
+  
+  receivingImage = false;
+  expectedPacket = 0;
+  totalPackets = 0;
+  totalBytesReceived = 0;
+}
+
+// Function to upload image to web server
 bool uploadImageToServer(const char* filepath) {
   File file = SPIFFS.open(filepath, FILE_READ);
   if (!file) {
@@ -266,17 +277,6 @@ bool uploadImageToServer(const char* filepath) {
     http.end();
     return false;
   }
-}
-
-Function to ver() {
-  if (receivingImage && imageFile) {
-    imageFile.close();
-  }
-  
-  receivingImage = false;
-  expectedPacket = 0;
-  totalPackets = 0;
-  totalBytesReceived = 0;
 }
 
 // Function to send image over Serial (for testing/debugging)

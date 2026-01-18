@@ -228,12 +228,25 @@ void handleEndPacket(Packet& packet) {
   Serial.printf("Total packets received: %d/%d\n", expectedPacket - 1, totalPackets);
   Serial.printf("Total bytes: %d\n", totalBytesReceived);
   
+  imageFile.flush();  // Ensure all data is written
   imageFile.close();
   
   // Display file info
   File file = SPIFFS.open("/received_image.jpg", FILE_READ);
   if (file) {
     Serial.printf("Saved file size: %d bytes\n", file.size());
+    
+    // Verify it's a valid JPEG (starts with FF D8)
+    if (file.size() >= 2) {
+      uint8_t header[2];
+      file.read(header, 2);
+      if (header[0] == 0xFF && header[1] == 0xD8) {
+        Serial.println("✓ Valid JPEG header detected");
+      } else {
+        Serial.printf("❌ Invalid JPEG header: 0x%02X 0x%02X (expected FF D8)\n", header[0], header[1]);
+      }
+    }
+    
     file.close();
     
     Serial.println("Image saved as: /received_image.jpg");

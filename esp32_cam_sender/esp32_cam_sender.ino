@@ -186,8 +186,9 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
   packet.packetType = 0;
   packet.packetNumber = 0;
   packet.totalPackets = totalPackets;
-  if (!sendPacketWithAck(packet)) {
   packet.dataLength = 0;
+  memset(packet.data, 0, PAYLOAD_SIZE);  // Clear data field
+  if (!sendPacketWithAck(packet)) {
     Serial.println("Failed to send START packet");
     return false;
   }
@@ -223,6 +224,7 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
   packet.packetNumber = packetNum + 1;
   packet.totalPackets = totalPackets;
   packet.dataLength = 0;
+  memset(packet.data, 0, PAYLOAD_SIZE);  // Clear data field
   if (!sendPacketWithAck(packet)) {
     Serial.println("Failed to send END packet");
     return false;

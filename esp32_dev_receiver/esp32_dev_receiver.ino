@@ -56,6 +56,7 @@ bool handleDataPacket(Packet& packet);
 void handleEndPacket(Packet& packet);
 void resetReceiver();
 bool uploadImageToServer(const char* filepath);
+void sendAck(uint16_t packetNum, bool success);
 //void sendImageOverSerial();
 
 // Image reception state

@@ -29,11 +29,17 @@ struct Packet {
   uint8_t data[PAYLOAD_SIZE];
 };
 
-//function prorotypes
+// ACK packet structure
+struct AckPacket {
+  uint8_t ackType;         // 0=ACK (success), 1=NACK (retry), 2=READY
+  uint16_t packetNumber;   // Which packet is being acknowledged
+  uint8_t padding[29];     // Pad to 32 bytes
+};
+
+//function prototypes
 bool initCamera();
 bool sendImage(uint8_t* imageData, size_t imageSize);
-bool sendPacketWithRetry(Packet& packet);
-bool sendPacketWithRetry(Packet& packet);
+bool sendPacketWithAck(Packet& packet);
 
 // ESP32-CAM AI-Thinker pin definitions
 #define PWDN_GPIO_NUM     32
@@ -79,7 +85,8 @@ void setup() {
   radio.setDataRate(RF24_250KBPS);  // Slower but more reliable
   radio.setChannel(108);
   radio.openWritingPipe(address);
-  radio.stopListening();
+  radio.openReadingPipe(1, address);  // Open reading pipe for ACKs
+  radio.stopListening();  // Start in TX mode
   
   Serial.println("NRF24 initialized");
   
@@ -176,11 +183,12 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
   packet.packetType = 0;
   packet.packetNumber = 0;
   packet.totalPackets = totalPackets;
+  if (!sendPacketWithAck(packet)) {
   packet.dataLength = 0;
-  while(!sendPacketWithRetry(packet)) {
     Serial.println("Failed to send START packet");
+    return false;
   }
-  Serial.println("START packet sent");
+  Serial.println("START packet acknowledged");
   
   // Send DATA packets
   while (offset < imageSize) {
@@ -194,15 +202,16 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
     packet.dataLength = chunkSize;
     memcpy(packet.data, imageData + offset, chunkSize);
     
-    while(!sendPacketWithRetry(packet)) {
-      Serial.printf("Failed to send packet %d\n", packetNum);
+    if (!sendPacketWithAck(packet)) {
+      Serial.printf("Failed to send packet %d after retries\n", packetNum);
+      return false;
     }
     
     offset += chunkSize;
     
     // Print progress every 50 packets
     if (packetNum % 50 == 0) {
-      Serial.printf("Progress: %d/%d packets\n", packetNum, totalPackets);
+      Serial.printf("Progress: %d/%d packets (ACKed)\n", packetNum, totalPackets);
     }
   }
   
@@ -211,39 +220,69 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
   packet.packetNumber = packetNum + 1;
   packet.totalPackets = totalPackets;
   packet.dataLength = 0;
-  while(!sendPacketWithRetry(packet)) {
+  if (!sendPacketWithAck(packet)) {
     Serial.println("Failed to send END packet");
+    return false;
   }
-  Serial.println("END packet sent");
+  Serial.println("END packet acknowledged");
   
   return true;
 }
 
-bool sendPacketWithRetry(Packet& packet) {
-  const int maxRetries = 3;
+bool sendPacketWithAck(Packet& packet) {
+  const int maxRetries = 5;
+  const unsigned long ackTimeout = 1000;  // 1 second timeout for ACK
   
-  for (int i = 0; i < maxRetries; i++) {
-    if (radio.write(&packet, PACKET_SIZE)) {
-      return true;
+  for (int attempt = 0; attempt < maxRetries; attempt++) {
+    // Send the packet
+    radio.stopListening();
+    bool sent = radio.write(&packet, PACKET_SIZE);
+    
+    if (!sent) {
+      Serial.printf("TX failed on attempt %d\n", attempt + 1);
+      delay(50);
+      continue;
     }
     
-    // Print diagnostic info on failure
-    if (i == 0) {
-      Serial.printf("Send failed (attempt %d/%d). Diagnostics:\n", i+1, maxRetries);
-      Serial.printf("  - Chip connected: %s\n", radio.isChipConnected() ? "YES" : "NO");
-      Serial.printf("  - Packet type: %d, number: %d\n", packet.packetType, packet.packetNumber);
+    // Wait for ACK
+    radio.startListening();
+    unsigned long startWait = millis();
+    bool gotAck = false;
+    
+    while (millis() - startWait < ackTimeout) {
+      if (radio.available()) {
+        AckPacket ack;
+        radio.read(&ack, sizeof(AckPacket));
+        
+        // Check if this is the ACK we're waiting for
+        if (ack.packetNumber == packet.packetNumber) {
+          if (ack.ackType == 0) {  // ACK
+            radio.stopListening();
+            return true;
+          } else if (ack.ackType == 1) {  // NACK - receiver wants retry
+            Serial.printf("Received NACK for packet %d, retrying...\n", packet.packetNumber);
+            gotAck = true;
+            break;
+          }
+        }
+      }
+      delayMicroseconds(100);
     }
     
-    delay(10);  // Short delay before retry
+    if (!gotAck) {
+      Serial.printf("ACK timeout for packet %d (attempt %d/%d)\n", 
+                    packet.packetNumber, attempt + 1, maxRetries);
+    }
+    
+    delay(50);  // Brief delay before retry
   }
   
-  Serial.println("FAILED after all retries!");
-  Serial.println("\nTroubleshooting tips:");
-  Serial.println("1. Check NRF24 power (add 10µF capacitor!)");
-  Serial.println("2. Verify wiring (CE, CSN, SCK, MOSI, MISO)");
-  Serial.println("3. Ensure receiver is powered on and listening");
-  Serial.println("4. Try reducing distance between modules");
-  Serial.println("5. Check for loose connections");
+  Serial.printf("FAILED after %d attempts for packet %d\n", maxRetries, packet.packetNumber);
+  Serial.println("Possible issues:");
+  Serial.println("- Receiver not responding");
+  Serial.println("- Too much interference");
+  Serial.println("- Modules too far apart");
   
+  radio.stopListening();
   return false;
 }

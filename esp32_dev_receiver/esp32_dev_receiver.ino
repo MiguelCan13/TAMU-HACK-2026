@@ -41,6 +41,13 @@ struct Packet {
   uint8_t data[PAYLOAD_SIZE];
 };
 
+// ACK packet structure (must match sender)
+struct AckPacket {
+  uint8_t ackType;         // 0=ACK (success), 1=NACK (retry), 2=READY
+  uint16_t packetNumber;   // Which packet is being acknowledged
+  uint8_t padding[29];     // Pad to 32 bytes
+};
+
 //function prototypes
 void handlePacket(Packet& packet);
 void handleStartPacket(Packet& packet);
@@ -48,7 +55,7 @@ void handleDataPacket(Packet& packet);
 void handleEndPacket(Packet& packet);
 void resetReceiver();
 bool uploadImageToServer(const char* filepath);
-void sendImageOverSerial();
+//void sendImageOverSerial();
 
 // Image reception state
 bool receivingImage = false;
@@ -98,10 +105,11 @@ void setup() {
   radio.setPALevel(RF24_PA_MAX);
   radio.setDataRate(RF24_250KBPS);
   radio.setChannel(108);
-  radio.openReadingPipe(1, address);
+  radio.openWritingPipe(address);        // For sending ACKs
+  radio.openReadingPipe(1, address);     // For receiving data
   radio.startListening();
   
-  Serial.println("NRF24 initialized");
+  Serial.println("NRF24 initialized with ACK support");
   Serial.println("Waiting for images...");
 }
 
@@ -120,31 +128,33 @@ void loop() {
     
     handlePacket(packet);
   }
-  //dont move on until a packet is recieved, will require 2 way transmission 
-  while (!radio.available()) {
-    delay(1);
-  }
-  
-  
 }
 
 void handlePacket(Packet& packet) {
+  bool success = false;
+  
   switch (packet.packetType) {
     case 0:  // START packet
       handleStartPacket(packet);
+      success = true;
       break;
       
     case 1:  // DATA packet
-      handleDataPacket(packet);
+      success = handleDataPacket(packet);
       break;
       
     case 2:  // END packet
       handleEndPacket(packet);
+      success = true;
       break;
       
     default:
       Serial.printf("Unknown packet type: %d\n", packet.packetType);
+      success = false;
   }
+  
+  // Send ACK or NACK
+  sendAck(packet.packetNumber, success);
 }
 
 void handleStartPacket(Packet& packet) {
@@ -169,24 +179,29 @@ void handleStartPacket(Packet& packet) {
   totalBytesReceived = 0;
 }
 
-void handleDataPacket(Packet& packet) {
+bool handleDataPacket(Packet& packet) {
   if (!receivingImage) {
     Serial.println("Received data packet but not in receiving mode!");
-    return;
+    return false;
   }
   
-  // Check for missing packets
+  // Verify packet sequence
   if (packet.packetNumber != expectedPacket) {
-    Serial.printf("Packet mismatch! Expected %d, got %d\n", 
-                  expectedPacket, packet.packetNumber);
-    // Could implement retry mechanism here
+    Serial.printf("❌ Packet mismatch! Expected %d, got %d - sending NACK\n", expectedPacket, packet.packetNumber);
+    return false;  // Send NACK
+  }
+  
+  // Verify data length is valid
+  if (packet.dataLength == 0 || packet.dataLength > PAYLOAD_SIZE) {
+    Serial.printf("❌ Invalid data length: %d - sending NACK\n", packet.dataLength);
+    return false;  // Send NACK
   }
   
   // Write data to file
   size_t written = imageFile.write(packet.data, packet.dataLength);
   if (written != packet.dataLength) {
-    Serial.printf("Write error! Expected %d, wrote %d\n", 
-                  packet.dataLength, written);
+    Serial.printf("❌ Write error! Expected %d, wrote %d - sending NACK\n", packet.dataLength, written);
+    return false;  // Send NACK
   }
   
   totalBytesReceived += written;
@@ -194,9 +209,10 @@ void handleDataPacket(Packet& packet) {
   
   // Print progress every 50 packets
   if (expectedPacket % 50 == 0) {
-    Serial.printf("Progress: %d/%d packets, %d bytes\n", 
-                  expectedPacket - 1, totalPackets, totalBytesReceived);
+    Serial.printf("✓ Progress: %d/%d packets, %d bytes\n", expectedPacket - 1, totalPackets, totalBytesReceived);
   }
+  
+  return true;  // Send ACK
 }
 
 void handleEndPacket(Packet& packet) {
@@ -244,6 +260,22 @@ void resetReceiver() {
   expectedPacket = 0;
   totalPackets = 0;
   totalBytesReceived = 0;
+}
+
+// Send ACK or NACK to sender
+void sendAck(uint16_t packetNum, bool success) {
+  AckPacket ack;
+  ack.ackType = success ? 0 : 1;  // 0=ACK, 1=NACK
+  ack.packetNumber = packetNum;
+  memset(ack.padding, 0, sizeof(ack.padding));
+  
+  radio.stopListening();
+  bool sent = radio.write(&ack, sizeof(AckPacket));
+  radio.startListening();
+  
+  if (!sent) {
+    Serial.printf("Failed to send %s for packet %d\n", success ? "ACK" : "NACK", packetNum);
+  }
 }
 
 // Function to upload image to web server
@@ -296,17 +328,17 @@ bool uploadImageToServer(const char* filepath) {
 }
 
 // Function to send image over Serial (for testing/debugging)
-void sendImageOverSerial() {
-  File file = SPIFFS.open("/received_image.jpg", FILE_READ);
-  if (!file) {
-    Serial.println("No image file found!");
-    return;
-  }
+// void sendImageOverSerial() {
+//   File file = SPIFFS.open("/received_image.jpg", FILE_READ);
+//   if (!file) {
+//     Serial.println("No image file found!");
+//     return;
+//   }
   
-  Serial.println("Sending image over serial...");
-  while (file.available()) {
-    Serial.write(file.read());
-  }
-  file.close();
-  Serial.println("\nImage sent!");
-}
+//   Serial.println("Sending image over serial...");
+//   while (file.available()) {
+//     Serial.write(file.read());
+//   }
+//   file.close();
+//   Serial.println("\nImage sent!");
+// }

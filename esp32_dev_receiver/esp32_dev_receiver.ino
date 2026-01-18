@@ -10,26 +10,20 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-//function prototypes
-void handlePacket(Packet& packet);
-void handleStartPacket(Packet& packet);
-void handleDataPacket(Packet& packet);
-void handleEndPacket(Packet& packet);
-
 // WiFi Configuration
-const char* ssid = "YOUR_WIFI_SSID";          // Change this
-const char* password = "YOUR_WIFI_PASSWORD";  // Change this
+const char* ssid = "heyguyswhatsup";      // Change this
+const char* password = "myroommatesarecool";  // Change this
 
 // Web Server Configuration
-const char* serverUrl = "http://192.168.1.100:5000/upload";  // Change this to your server
+const char* serverUrl = "http://192.168.0.198:5000/upload";  // Change this to your server
 // Examples:
 // Local server: "http://192.168.1.100:5000/upload"
 // Cloud server: "https://yourserver.com/api/upload"
 // Python Flask default: "http://192.168.1.100:5000/upload"
 
 // NRF24L01 Configuration
-#define CE_PIN 4    // Adjust based on your wiring
-#define CSN_PIN 5   // Adjust based on your wiring
+#define CE_PIN 9    // Adjust based on your wiring
+#define CSN_PIN 10   // Adjust based on your wiring
 RF24 radio(CE_PIN, CSN_PIN);
 
 const byte address[6] = "00001";  // Must match sender
@@ -46,6 +40,15 @@ struct Packet {
   uint8_t dataLength;      // Actual data length in this packet
   uint8_t data[PAYLOAD_SIZE];
 };
+
+//function prototypes
+void handlePacket(Packet& packet);
+void handleStartPacket(Packet& packet);
+void handleDataPacket(Packet& packet);
+void handleEndPacket(Packet& packet);
+void resetReceiver();
+bool uploadImageToServer(const char* filepath);
+void sendImageOverSerial();
 
 // Image reception state
 bool receivingImage = false;
@@ -86,6 +89,7 @@ void setup() {
   }
 
   // Initialize NRF24
+  //SPI.begin(14, 12, 13, 15);
   if (!radio.begin()) {
     Serial.println("NRF24 initialization failed!");
     while (1);

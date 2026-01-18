@@ -64,6 +64,7 @@ void setup() {
   // Initialize NRF24
   if (!radio.begin()) {
     Serial.println("NRF24 initialization failed!");
+    Serial.println("Check wiring and power supply!");
     while (1);
   }
   
@@ -74,6 +75,19 @@ void setup() {
   radio.stopListening();
   
   Serial.println("NRF24 initialized");
+  
+  // Print diagnostic info
+  Serial.println("\n=== NRF24 Configuration ===");
+  Serial.print("Channel: ");
+  Serial.println(radio.getChannel());
+  Serial.print("Data Rate: ");
+  Serial.println(radio.getDataRate());
+  Serial.print("PA Level: ");
+  Serial.println(radio.getPALevel());
+  Serial.print("Is Chip Connected: ");
+  Serial.println(radio.isChipConnected() ? "YES" : "NO");
+  Serial.println("==========================\n");
+  
   Serial.println("System ready!");
 }
 
@@ -156,9 +170,8 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
   packet.packetNumber = 0;
   packet.totalPackets = totalPackets;
   packet.dataLength = 0;
-  if (!sendPacketWithRetry(packet)) {
+  while(!sendPacketWithRetry(packet)) {
     Serial.println("Failed to send START packet");
-    return false;
   }
   Serial.println("START packet sent");
   
@@ -174,9 +187,8 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
     packet.dataLength = chunkSize;
     memcpy(packet.data, imageData + offset, chunkSize);
     
-    if (!sendPacketWithRetry(packet)) {
+    while(!sendPacketWithRetry(packet)) {
       Serial.printf("Failed to send packet %d\n", packetNum);
-      return false;
     }
     
     offset += chunkSize;
@@ -192,9 +204,8 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
   packet.packetNumber = packetNum + 1;
   packet.totalPackets = totalPackets;
   packet.dataLength = 0;
-  if (!sendPacketWithRetry(packet)) {
+  while(!sendPacketWithRetry(packet)) {
     Serial.println("Failed to send END packet");
-    return false;
   }
   Serial.println("END packet sent");
   
@@ -208,8 +219,24 @@ bool sendPacketWithRetry(Packet& packet) {
     if (radio.write(&packet, PACKET_SIZE)) {
       return true;
     }
+    
+    // Print diagnostic info on failure
+    if (i == 0) {
+      Serial.printf("Send failed (attempt %d/%d). Diagnostics:\n", i+1, maxRetries);
+      Serial.printf("  - Chip connected: %s\n", radio.isChipConnected() ? "YES" : "NO");
+      Serial.printf("  - Packet type: %d, number: %d\n", packet.packetType, packet.packetNumber);
+    }
+    
     delay(10);  // Short delay before retry
   }
+  
+  Serial.println("FAILED after all retries!");
+  Serial.println("\nTroubleshooting tips:");
+  Serial.println("1. Check NRF24 power (add 10µF capacitor!)");
+  Serial.println("2. Verify wiring (CE, CSN, SCK, MOSI, MISO)");
+  Serial.println("3. Ensure receiver is powered on and listening");
+  Serial.println("4. Try reducing distance between modules");
+  Serial.println("5. Check for loose connections");
   
   return false;
 }

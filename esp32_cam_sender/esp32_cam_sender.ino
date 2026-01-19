@@ -191,7 +191,10 @@ bool initCamera() {
 
 bool sendImage(uint8_t* imageData, size_t imageSize) {
   uint16_t totalPackets = (imageSize + PAYLOAD_SIZE - 1) / PAYLOAD_SIZE;
-  Serial.printf("Sending %d bytes in %d packets\n", imageSize, totalPackets);
+  Serial.printf("Sending %d bytes in %d DATA packets\n", imageSize, totalPackets);
+  Serial.printf("Payload size: %d bytes per packet\n", PAYLOAD_SIZE);
+  Serial.printf("Expected packets: START(0) + DATA(1-%d) + END(%d)\n", 
+                totalPackets, totalPackets + 1);
   
   Packet packet;
   uint16_t packetNum = 0;
@@ -234,12 +237,17 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
     }
   }
   
-  // Send END packet
+  Serial.printf("Total DATA packets sent: %d (expected %d)\n", packetNum, totalPackets);
+  
+  // Send END packet - packet number should match what receiver expects next
   packet.packetType = 2;
-  packet.packetNumber = packetNum + 1;
+  packet.packetNumber = packetNum + 1;  // This will be totalPackets + 1
   packet.totalPackets = totalPackets;
   packet.dataLength = 0;
   memset(packet.data, 0, PAYLOAD_SIZE);  // Clear data field
+  
+  Serial.printf("Sending END packet #%d\n", packet.packetNumber);
+  
   if (!sendPacketWithAck(packet)) {
     Serial.println("Failed to send END packet");
     return false;

@@ -229,6 +229,10 @@ void handleEndPacket(Packet& packet) {
     return;
   }
   
+  // END packet comes after all data packets, so it's packetNumber should be expectedPacket
+  Serial.printf("END packet received (packet #%d, expected #%d)\n", 
+                packet.packetNumber, expectedPacket);
+  
   Serial.println("\n=== Image reception complete ===");
   Serial.printf("Total packets received: %d/%d\n", expectedPacket - 1, totalPackets);
   Serial.printf("Total bytes: %d\n", totalBytesReceived);

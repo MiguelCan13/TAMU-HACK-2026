@@ -58,6 +58,7 @@ void setup() {
   radio.setChannel(115);
   radio.setDataRate(RF24_2MBPS);
   radio.openReadingPipe(1, address);
+  radio.openWritingPipe(address);  // Open writing pipe for ACKs
   radio.startListening();
 
   leds[0] = CRGB::Green; FastLED.show();
@@ -90,6 +91,11 @@ void loop() {
         Serial.printf("[DEBUG] Processing frame: %d%%\n", (incoming.pixel_index * 100) / 76800);
       }
     }
+    
+    // Send ACK back to sender
+    radio.stopListening();
+    radio.write(&incoming.pixel_index, sizeof(uint32_t));
+    radio.startListening();
   }
 
   // GAP DETECTION: If we had data but haven't heard anything for 100ms

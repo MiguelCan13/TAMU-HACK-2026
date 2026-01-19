@@ -21,43 +21,16 @@
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
 
-#define TRIG_PIN 4  
-#define ECHO_PIN 16 
-#define THRESHOLD_CM 30
-
-long getDistance() {
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
-  long cm = (duration * 0.034 / 2);
-  
-  // Set pins to neutral to avoid Camera Bus interference
-  pinMode(TRIG_PIN, INPUT);
-  pinMode(ECHO_PIN, INPUT);
-  return cm;
-}
-
 RF24 radio(2, 15); 
 const byte address[] = "00001";
 
 struct IndexedChunk {
   uint32_t pixel_index; 
   uint16_t pixels[14];  
-};
-
-IndexedChunk chunk; 
+}; 
 
 void setup() {
   Serial.begin(115200);
-
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  digitalWrite(TRIG_PIN, LOW);
   
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -72,9 +45,8 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_RGB565;
-  config.frame_size = FRAMESIZE_QQVGA; 
+  config.frame_size = FRAMESIZE_QVGA; 
   config.fb_count = 1;
-  config.fb_location = CAMERA_FB_IN_DRAM;
 
   esp_camera_init(&config);
   sensor_t * s = esp_camera_sensor_get();
@@ -101,24 +73,20 @@ void setup() {
 }
 
 void loop() {
-  long distance = getDistance();
-  
-  if (distance > 0 && distance < THRESHOLD_CM) {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) return;
 
-    pinMode(16, INPUT); // Release the pin immediately
-    delay(200);         // Wait for electrical noise to settle
-    camera_fb_t * fb = esp_camera_fb_get();
-    if (!fb) return;
+  uint16_t* raw_pixels = (uint16_t*)fb->buf;
+  IndexedChunk chunk;
 
-    uint16_t* raw_pixels = (uint16_t*)fb->buf;
-    Serial.println("Sending frame...");
-    uint32_t failed_packets = 0;
+  Serial.println("Sending frame...");
+  uint32_t failed_packets = 0;
   
-    for (uint32_t i = 0; i < 76800; i += 14) {
-      chunk.pixel_index = i;
-      for (int j = 0; j < 14; j++) {
-        if (i + j < 76800) chunk.pixels[j] = raw_pixels[i + j];
-      }
+  for (uint32_t i = 0; i < 76800; i += 14) {
+    chunk.pixel_index = i;
+    for (int j = 0; j < 14; j++) {
+      if (i + j < 76800) chunk.pixels[j] = raw_pixels[i + j];
+    }
     
     // Send packet
     radio.stopListening();
@@ -158,15 +126,14 @@ void loop() {
         break;
       }
     }
-      // Progress indicator
-      if (i % 11200 == 0) {
-        Serial.printf("Progress: %d%%\n", (i * 100) / 76800);
-      }
+    
+    // Progress indicator
+    if (i % 11200 == 0) {
+      Serial.printf("Progress: %d%%\n", (i * 100) / 76800);
     }
+  }
 
-    esp_camera_fb_return(fb);
-    Serial.printf("Frame sent. Failed packets: %lu. Waiting 100ms...\n", failed_packets);
-    delay(100); 
-  }f("Frame sent. Failed packets: %lu. Waiting 100ms...\n", failed_packets);
+  esp_camera_fb_return(fb);
+  Serial.printf("Frame sent. Failed packets: %lu. Waiting 100ms...\n", failed_packets);
   delay(100); 
 }

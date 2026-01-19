@@ -21,6 +21,27 @@
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
 
+#define TRIG_PIN 4  
+#define ECHO_PIN 16 
+#define THRESHOLD_CM 30
+
+long getDistance() {
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
+  long cm = (duration * 0.034 / 2);
+  
+  // Set pins to neutral to avoid Camera Bus interference
+  pinMode(TRIG_PIN, INPUT);
+  pinMode(ECHO_PIN, INPUT);
+  return cm;
+}
+
 RF24 radio(2, 15); 
 const byte address[] = "00001";
 
@@ -29,8 +50,15 @@ struct IndexedChunk {
   uint16_t pixels[14];  
 }; 
 
+//there are 2 different camera modules. Each module has a register(ID num) 
+const uint8_t node_id = 2;
+
 void setup() {
   Serial.begin(115200);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
   
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -45,8 +73,10 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_RGB565;
-  config.frame_size = FRAMESIZE_QVGA; 
+  config.frame_size = FRAMESIZE_QQVGA; 
   config.fb_count = 1;
+  config.fb_location = CAMERA_FB_IN_DRAM;
+  config.grab_mode = CAMERA_GRAB_LATEST;
 
   esp_camera_init(&config);
   sensor_t * s = esp_camera_sensor_get();
@@ -67,73 +97,57 @@ void setup() {
   radio.setDataRate(RF24_2MBPS);
   radio.setPALevel(RF24_PA_MAX);
   radio.openWritingPipe(address);
-  radio.openReadingPipe(1, address);  // Open reading pipe for ACKs
   radio.stopListening();
   Serial.println("Sender Ready.");
 }
 
 void loop() {
-  camera_fb_t * fb = esp_camera_fb_get();
-  if (!fb) return;
-
-  uint16_t* raw_pixels = (uint16_t*)fb->buf;
-  IndexedChunk chunk;
-
-  Serial.println("Sending frame...");
-  uint32_t failed_packets = 0;
+  long distance = getDistance();
   
-  for (uint32_t i = 0; i < 76800; i += 14) {
-    chunk.pixel_index = i;
-    for (int j = 0; j < 14; j++) {
-      if (i + j < 76800) chunk.pixels[j] = raw_pixels[i + j];
-    }
-    
-    // Send packet
-    radio.stopListening();
-    bool sent = radio.write(&chunk, sizeof(IndexedChunk));
-    
-    if (!sent) {
-      Serial.printf("Failed to send packet %lu\n", i);
-      failed_packets++;
-      continue;
-    }
-    
-    // Switch to listening mode for ACK
-    radio.startListening();
-    unsigned long ackTimeout = millis();
-    bool ackReceived = false;
-    
-    // Wait for ACK with timeout
-    while (millis() - ackTimeout < 10) {  // 10ms timeout
-      if (radio.available()) {
-        uint32_t ack_index;
-        radio.read(&ack_index, sizeof(uint32_t));
-        
-        if (ack_index == i) {
-          ackReceived = true;
+  if (distance > 0 && distance < THRESHOLD_CM) {
+
+    pinMode(16, INPUT); // Release the pin immediately
+    delay(50);         // Wait for electrical noise to settle
+
+
+    //take 2 captures for some fucking reason then discard the first one idk
+    camera_fb_t * fb = NULL;
+    fb = esp_camera_fb_get();
+    esp_camera_fb_return(fb);
+    fb = NULL;
+    fb = esp_camera_fb_get();
+
+    if (!fb) return;
+
+    uint16_t* raw_pixels = (uint16_t*)fb->buf;
+    IndexedChunk chunk;
+
+    //wait to recieve the register request from the reciever
+    uint8_t incoming_id;
+    while(true){
+      Serial.println("Waiting for receiver...");
+      if(radio.available()){
+        radio.read(&incoming_id, sizeof(uint8_t));
+        if(incoming_id == node_id){
+          //reciever is ready to recieve data
+          radio.write(&node_id, sizeof(uint8_t)); //send back the register to confirm
+          Serial.println("Receiver ready, sending data...");
           break;
         }
       }
-      delayMicroseconds(50);
     }
-    
-    if (!ackReceived) {
-      Serial.printf("No ACK for packet %lu, retrying...\n", i);
-      i -= 14;  // Retry this packet
-      failed_packets++;
-      if (failed_packets > 100) {
-        Serial.println("Too many failures, aborting frame");
-        break;
-      }
-    }
-    
-    // Progress indicator
-    if (i % 11200 == 0) {
-      Serial.printf("Progress: %d%%\n", (i * 100) / 76800);
-    }
-  }
 
-  esp_camera_fb_return(fb);
-  Serial.printf("Frame sent. Failed packets: %lu. Waiting 100ms...\n", failed_packets);
-  delay(100); 
+    for (uint32_t i = 0; i < 76800; i += 14) {
+      chunk.pixel_index = i;
+      for (int j = 0; j < 14; j++) {
+        if (i + j < 76800) chunk.pixels[j] = raw_pixels[i + j];
+      }
+      radio.write(&chunk, sizeof(IndexedChunk));
+      delayMicroseconds(50); // Crucial: Gives receiver time to process
+    }
+      esp_camera_fb_return(fb);
+      Serial.println("Frame sent. Waiting 100us...");
+      delayMicroseconds(100); 
+  }
+  delay(500);
 }

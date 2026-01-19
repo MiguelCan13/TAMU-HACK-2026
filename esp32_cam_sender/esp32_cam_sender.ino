@@ -50,6 +50,9 @@ struct IndexedChunk {
   uint16_t pixels[14];  
 }; 
 
+//there are 2 different camera modules. Each module has a register(ID num) 
+const uint8_t node_id = 1;
+
 void setup() {
   Serial.begin(115200);
 
@@ -119,7 +122,21 @@ void loop() {
     uint16_t* raw_pixels = (uint16_t*)fb->buf;
     IndexedChunk chunk;
 
-    Serial.println("Sending frame...");
+    //wait to recieve the register request from the reciever
+    uint8_t incoming_id;
+    while(true){
+      Serial.println("Waiting for receiver...");
+      if(radio.available()){
+        radio.read(&incoming_id, sizeof(uint8_t));
+        if(incoming_id == node_id){
+          //reciever is ready to recieve data
+          radio.write(&node_id, sizeof(uint8_t)); //send back the register to confirm
+          Serial.println("Receiver ready, sending data...");
+          break;
+        }
+      }
+    }
+
     for (uint32_t i = 0; i < 76800; i += 14) {
       chunk.pixel_index = i;
       for (int j = 0; j < 14; j++) {

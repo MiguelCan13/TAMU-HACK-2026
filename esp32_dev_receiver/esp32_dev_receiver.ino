@@ -21,6 +21,12 @@ struct IndexedChunk {
   uint16_t pixels[14];
 };
 
+struct Node{
+  uint8_t id;
+};
+
+uint8_t nodes[] = {1, 2};
+
 unsigned long lastPacketTime = 0;
 bool hasNewData = false;
 
@@ -67,10 +73,31 @@ void setup() {
 void loop() {
   if (radio.available()) {
     IndexedChunk incoming;
-    radio.read(&incoming, sizeof(IndexedChunk));
-    
+    //there are 2 nodes, in order to not recieve 2 different images at the same time,
+    //each node will have an id and the reciever will alternate between them, checking if 
+    //data is ready to be recieved. This will be done by sending the register of the node
+    //and if the node recieves its register back it will send data, otherwise it will wait.
+
+    //check to see which node is ready to send data
+    while(true){
+      for(int i = 0; i < sizeof(nodes); i++){
+        radio.write(&nodes[i], sizeof(uint8_t));
+        delay(10); //give some time for the node to respond
+        if(radio.available()){
+          radio.read(&incoming, sizeof(uint8_t));
+          if(incoming == nodes[i]){
+            //node is ready to send data
+            Serial.printf("[SYSTEM] Incoming package from Node %d.\n", nodes[i]);
+            break;
+          }
+        }
+      }
+    }
+
     lastPacketTime = millis();
     hasNewData = true;
+    radio.read(&incoming, sizeof(IndexedChunk));
+    
 
     if (incoming.pixel_index <= (76800 - 14)) {
       for (int i = 0; i < 14; i++) {

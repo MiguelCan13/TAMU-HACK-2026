@@ -1,325 +1,94 @@
-/*
- * ESP32-CAM Image Sender via NRF24L01+
- * Captures image from camera and sends it in chunks to receiver
- */
-
+#include <Arduino.h>
 #include <SPI.h>
 #include <RF24.h>
 #include "esp_camera.h"
-#include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
 
-// NRF24L01 Configuration
-#define CE_PIN 2    // Adjust based on your wiring
-#define CSN_PIN 15   // Adjust based on your wiring
-RF24 radio(CE_PIN, CSN_PIN);
+// --- Camera Pins (AI-Thinker) ---
+#define PWDN_GPIO_NUM 32
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM 0
+#define SIOD_GPIO_NUM 26
+#define SIOC_GPIO_NUM 27
+#define Y9_GPIO_NUM 35
+#define Y8_GPIO_NUM 34
+#define Y7_GPIO_NUM 39
+#define Y6_GPIO_NUM 36
+#define Y5_GPIO_NUM 21
+#define Y4_GPIO_NUM 19
+#define Y3_GPIO_NUM 18
+#define Y2_GPIO_NUM 5
+#define VSYNC_GPIO_NUM 25
+#define HREF_GPIO_NUM 23
+#define PCLK_GPIO_NUM 22
 
-const byte address[6] = "00001";  // Communication address
-const byte ackAddress[6] = "00002";  // ACK return address
+RF24 radio(2, 15); 
+const byte address[] = "00001";
 
-// Packet structure
-#define PACKET_SIZE 32
-#define HEADER_SIZE 6
-#define PAYLOAD_SIZE (PACKET_SIZE - HEADER_SIZE)  // 26 bytes for image data
-
-struct Packet {
-  uint8_t packetType;      // 0=start, 1=data, 2=end
-  uint16_t packetNumber;   // Sequential packet number
-  uint16_t totalPackets;   // Total packets for this image
-  uint8_t dataLength;      // Actual data length in this packet
-  uint8_t data[PAYLOAD_SIZE];
-} __attribute__((packed));  // Force no padding
-
-// ACK packet structure
-struct AckPacket {
-  uint8_t ackType;         // 0=ACK (success), 1=NACK (retry), 2=READY
-  uint16_t packetNumber;   // Which packet is being acknowledged
-  uint8_t padding[29];     // Pad to 32 bytes
-} __attribute__((packed));  // Force no padding
-
-//function prototypes
-bool initCamera();
-bool sendImage(uint8_t* imageData, size_t imageSize);
-bool sendPacketWithAck(Packet& packet);
-
-// ESP32-CAM AI-Thinker pin definitions
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
+struct IndexedChunk {
+  uint32_t pixel_index; 
+  uint16_t pixels[14];  
+}; 
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("ESP32-CAM NRF24 Sender Initializing...");
-
-  // Disable brownout detector
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-
-  // Initialize camera
-  if (!initCamera()) {
-    Serial.println("Camera initialization failed!");
-    while (1);
-  }
-  Serial.println("Camera initialized");
-
-  // Initialize NRF24
-  SPI.begin(14, 12, 13, 15);
-  if (!radio.begin()) {
-    Serial.println("NRF24 initialization failed!");
-    Serial.println("Check wiring and power supply!");
-    while (1);
-  }
   
-  radio.setPALevel(RF24_PA_MAX);
-  radio.setDataRate(RF24_250KBPS);  // Slower but more reliable
-  radio.setChannel(108);
-  radio.openWritingPipe(address);      // Write data on pipe "00001"
-  radio.openReadingPipe(1, ackAddress); // Read ACKs on pipe "00002"
-  radio.stopListening();  // Start in TX mode
-  
-  Serial.println("NRF24 initialized");
-  
-  // Print diagnostic info
-  Serial.println("\n=== NRF24 Configuration ===");
-  Serial.print("Channel: ");
-  Serial.println(radio.getChannel());
-  Serial.print("Data Rate: ");
-  Serial.println(radio.getDataRate());
-  Serial.print("PA Level: ");
-  Serial.println(radio.getPALevel());
-  Serial.print("Is Chip Connected: ");
-  Serial.println(radio.isChipConnected() ? "YES" : "NO");
-  Serial.println("TX pipe: 00001 (data)");
-  Serial.println("RX pipe: 00002 (ACKs)");
-  Serial.println("==========================\n");
-  
-  Serial.println("System ready!");
-  
-  // Verify struct sizes
-  Serial.printf("Packet struct size: %d bytes (should be 32)\n", sizeof(Packet));
-  Serial.printf("AckPacket struct size: %d bytes (should be 32)\n", sizeof(AckPacket));
-}
-
-void loop() {
-  Serial.println("\n--- Capturing and sending image ---");
-  
-  // Capture image
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    delay(2000);
-    return;
-  }
-  
-  Serial.printf("Image captured: %d bytes, %dx%d\n", fb->len, fb->width, fb->height);
-  
-  // Validate JPEG before sending
-  if (fb->len >= 4) {
-    Serial.printf("JPEG Header: 0x%02X 0x%02X (should be FF D8)\n", fb->buf[0], fb->buf[1]);
-    Serial.printf("JPEG Footer: 0x%02X 0x%02X (should be FF D9)\n", 
-                  fb->buf[fb->len - 2], fb->buf[fb->len - 1]);
-    
-    if (fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
-      Serial.println("❌ WARNING: Camera produced invalid JPEG header!");
-    }
-    if (fb->buf[fb->len - 2] != 0xFF || fb->buf[fb->len - 1] != 0xD9) {
-      Serial.println("❌ WARNING: Camera produced invalid JPEG footer!");
-      Serial.println("This may indicate incomplete image capture.");
-    }
-  }
-  
-  // Send image
-  bool success = sendImage(fb->buf, fb->len);
-  
-  // Return framebuffer
-  esp_camera_fb_return(fb);
-  
-  if (success) {
-    Serial.println("Image sent successfully!");
-  } else {
-    Serial.println("Image transmission failed");
-  }
-  
-  delay(5000);  // Wait 5 seconds before next capture
-}
-
-bool initCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
+  config.pin_d0 = Y2_GPIO_NUM; config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM; config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM; config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM; config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM; config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM; config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM; config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  
-  // Use lower resolution for faster transmission
-  config.frame_size = FRAMESIZE_QVGA;  // 320x240
-  config.jpeg_quality = 12;  // 0-63, lower = higher quality (but larger size)
+  config.pixel_format = PIXFORMAT_RGB565;
+  config.frame_size = FRAMESIZE_QVGA; 
   config.fb_count = 1;
-  
-  // Initialize camera
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed: 0x%x\n", err);
-    return false;
-  }
-  
-  return true;
-}
 
-bool sendImage(uint8_t* imageData, size_t imageSize) {
-  uint16_t totalPackets = (imageSize + PAYLOAD_SIZE - 1) / PAYLOAD_SIZE;
-  Serial.printf("Sending %d bytes in %d DATA packets\n", imageSize, totalPackets);
-  Serial.printf("Payload size: %d bytes per packet\n", PAYLOAD_SIZE);
-  Serial.printf("Expected packets: START(0) + DATA(1-%d) + END(%d)\n", 
-                totalPackets, totalPackets + 1);
-  
-  Packet packet;
-  uint16_t packetNum = 0;
-  size_t offset = 0;
-  
-  // Send START packet
-  packet.packetType = 0;
-  packet.packetNumber = 0;
-  packet.totalPackets = totalPackets;
-  packet.dataLength = 0;
-  memset(packet.data, 0, PAYLOAD_SIZE);  // Clear data field
-  
-  // Debug: verify START packet contents before sending
-  Serial.printf("START packet contents: type=%d, num=%d, total=%d, len=%d\n",
-                packet.packetType, packet.packetNumber, packet.totalPackets, packet.dataLength);
-  
-  if (!sendPacketWithAck(packet)) {
-    Serial.println("Failed to send START packet");
-    return false;
-  }
-  Serial.println("START packet acknowledged");
-  
-  // Send DATA packets
-  while (offset < imageSize) {
-    packetNum++;
-    size_t remaining = imageSize - offset;
-    size_t chunkSize = (remaining < PAYLOAD_SIZE) ? remaining : PAYLOAD_SIZE;
-    
-    packet.packetType = 1;
-    packet.packetNumber = packetNum;
-    packet.totalPackets = totalPackets;
-    packet.dataLength = chunkSize;
-    memcpy(packet.data, imageData + offset, chunkSize);
-    
-    if (!sendPacketWithAck(packet)) {
-      Serial.printf("Failed to send packet %d after retries\n", packetNum);
-      return false;
-    }
-    
-    offset += chunkSize;
-    
-    // Print progress every 50 packets
-    if (packetNum % 50 == 0) {
-      Serial.printf("Progress: %d/%d packets (ACKed)\n", packetNum, totalPackets);
-    }
-  }
-  
-  Serial.printf("Total DATA packets sent: %d (expected %d)\n", packetNum, totalPackets);
-  
-  // Send END packet - packet number should match what receiver expects next
-  packet.packetType = 2;
-  packet.packetNumber = packetNum + 1;  // This will be totalPackets + 1
-  packet.totalPackets = totalPackets;
-  packet.dataLength = 0;
-  memset(packet.data, 0, PAYLOAD_SIZE);  // Clear data field
-  
-  Serial.printf("Sending END packet #%d\n", packet.packetNumber);
-  
-  if (!sendPacketWithAck(packet)) {
-    Serial.println("Failed to send END packet");
-    return false;
-  }
-  Serial.println("END packet acknowledged");
-  
-  return true;
-}
+  esp_camera_init(&config);
+  sensor_t * s = esp_camera_sensor_get();
+  s->set_vflip(s, 1); 
+  s->set_brightness(s, 0);     
+  s->set_contrast(s, 0);       
+  s->set_saturation(s, -1);    // Lower saturation helps with color "bleeding"
+  s->set_whitebal(s, 1);       // Enable Auto White Balance
+  s->set_awb_gain(s, 1);       
+  s->set_exposure_ctrl(s, 1);  // Enable Auto Exposure
+  s->set_aec2(s, 1);           // Enable DSP Auto Exposure
+  s->set_gain_ctrl(s, 1);      // Enable Auto Gain
 
-bool sendPacketWithAck(Packet& packet) {
-  const int maxRetries = 5;
-  const unsigned long ackTimeout = 1000;  // 1 second timeout for ACK
-  
-  for (int attempt = 0; attempt < maxRetries; attempt++) {
-    // Send the packet
-    radio.stopListening();
-    bool sent = radio.write(&packet, PACKET_SIZE);
-    
-    if (!sent) {
-      Serial.printf("TX failed on attempt %d\n", attempt + 1);
-      delay(50);
-      continue;
-    }
-    
-    // Wait for ACK
-    radio.startListening();
-    unsigned long startWait = millis();
-    bool gotAck = false;
-    
-    while (millis() - startWait < ackTimeout) {
-      if (radio.available()) {
-        AckPacket ack;
-        radio.read(&ack, sizeof(AckPacket));
-        
-        // Check if this is the ACK we're waiting for
-        if (ack.packetNumber == packet.packetNumber) {
-          if (ack.ackType == 0) {  // ACK
-            radio.stopListening();
-            return true;
-          } else if (ack.ackType == 1) {  // NACK - receiver wants retry
-            Serial.printf("Received NACK for packet %d, retrying...\n", packet.packetNumber);
-            gotAck = true;
-            break;
-          }
-        }
-      }
-      delayMicroseconds(100);
-    }
-    
-    if (!gotAck) {
-      Serial.printf("ACK timeout for packet %d (attempt %d/%d)\n", 
-                    packet.packetNumber, attempt + 1, maxRetries);
-    }
-    
-    delay(50);  // Brief delay before retry
-  }
-  
-  Serial.printf("FAILED after %d attempts for packet %d\n", maxRetries, packet.packetNumber);
-  Serial.println("Possible issues:");
-  Serial.println("- Receiver not responding");
-  Serial.println("- Too much interference");
-  Serial.println("- Modules too far apart");
-  
+  SPI.begin(14, 12, 13, 15);
+  radio.begin();
+  radio.setAutoAck(false);
+  radio.setChannel(115);
+  radio.setDataRate(RF24_2MBPS);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.openWritingPipe(address);
   radio.stopListening();
-  return false;
+  Serial.println("Sender Ready.");
+}
+
+void loop() {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (!fb) return;
+
+  uint16_t* raw_pixels = (uint16_t*)fb->buf;
+  IndexedChunk chunk;
+
+  Serial.println("Sending frame...");
+  for (uint32_t i = 0; i < 76800; i += 14) {
+    chunk.pixel_index = i;
+    for (int j = 0; j < 14; j++) {
+      if (i + j < 76800) chunk.pixels[j] = raw_pixels[i + j];
+    }
+    radio.write(&chunk, sizeof(IndexedChunk));
+    delayMicroseconds(150); // Crucial: Gives receiver time to process
+  }
+
+  esp_camera_fb_return(fb);
+  Serial.println("Frame sent. Waiting 100ms...");
+  delay(100); 
 }

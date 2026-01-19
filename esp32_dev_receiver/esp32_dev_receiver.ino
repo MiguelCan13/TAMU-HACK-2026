@@ -335,16 +335,7 @@ bool uploadImageToServer(const char* filepath) {
   size_t fileSize = file.size();
   Serial.printf("Uploading %d bytes...\n", fileSize);
   
-  HTTPClient http;
-  http.begin(serverUrl);
-  
-  // Set content type for JPEG image
-  http.addHeader("Content-Type", "image/jpeg");
-  // Optional: Add custom headers
-  http.addHeader("X-Device-ID", "ESP32-Receiver");
-  http.addHeader("X-Timestamp", String(millis()));
-  
-  // Read file into buffer and send
+  // Read file into buffer
   uint8_t* buffer = (uint8_t*)malloc(fileSize);
   if (!buffer) {
     Serial.println("Failed to allocate buffer");
@@ -352,10 +343,36 @@ bool uploadImageToServer(const char* filepath) {
     return false;
   }
   
-  file.read(buffer, fileSize);
+  size_t bytesRead = file.read(buffer, fileSize);
   file.close();
   
+  if (bytesRead != fileSize) {
+    Serial.printf("⚠️  File read mismatch: read %d, expected %d\n", bytesRead, fileSize);
+    free(buffer);
+    return false;
+  }
+  
+  // Verify JPEG integrity before upload
+  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
+    Serial.printf("❌ Buffer has invalid JPEG header: 0x%02X 0x%02X\n", buffer[0], buffer[1]);
+  }
+  if (buffer[fileSize-2] != 0xFF || buffer[fileSize-1] != 0xD9) {
+    Serial.printf("❌ Buffer has invalid JPEG footer: 0x%02X 0x%02X\n", 
+                  buffer[fileSize-2], buffer[fileSize-1]);
+  }
+  
+  HTTPClient http;
+  http.begin(serverUrl);
+  http.setTimeout(10000);  // 10 second timeout
+  
+  // Set content type for JPEG image
+  http.addHeader("Content-Type", "image/jpeg");
+  http.addHeader("Content-Length", String(fileSize));
+  http.addHeader("X-Device-ID", "ESP32-Receiver");
+  http.addHeader("X-Timestamp", String(millis()));
+  
   // Send POST request
+  Serial.println("Sending HTTP POST...");
   int httpResponseCode = http.POST(buffer, fileSize);
   
   free(buffer);

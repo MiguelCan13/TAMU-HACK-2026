@@ -28,14 +28,14 @@ struct Packet {
   uint16_t totalPackets;   // Total packets for this image
   uint8_t dataLength;      // Actual data length in this packet
   uint8_t data[PAYLOAD_SIZE];
-};
+} __attribute__((packed));  // Force no padding
 
 // ACK packet structure
 struct AckPacket {
   uint8_t ackType;         // 0=ACK (success), 1=NACK (retry), 2=READY
   uint16_t packetNumber;   // Which packet is being acknowledged
   uint8_t padding[29];     // Pad to 32 bytes
-};
+} __attribute__((packed));  // Force no padding
 
 //function prototypes
 bool initCamera();
@@ -106,6 +106,10 @@ void setup() {
   Serial.println("==========================\n");
   
   Serial.println("System ready!");
+  
+  // Verify struct sizes
+  Serial.printf("Packet struct size: %d bytes (should be 32)\n", sizeof(Packet));
+  Serial.printf("AckPacket struct size: %d bytes (should be 32)\n", sizeof(AckPacket));
 }
 
 void loop() {
@@ -206,6 +210,11 @@ bool sendImage(uint8_t* imageData, size_t imageSize) {
   packet.totalPackets = totalPackets;
   packet.dataLength = 0;
   memset(packet.data, 0, PAYLOAD_SIZE);  // Clear data field
+  
+  // Debug: verify START packet contents before sending
+  Serial.printf("START packet contents: type=%d, num=%d, total=%d, len=%d\n",
+                packet.packetType, packet.packetNumber, packet.totalPackets, packet.dataLength);
+  
   if (!sendPacketWithAck(packet)) {
     Serial.println("Failed to send START packet");
     return false;

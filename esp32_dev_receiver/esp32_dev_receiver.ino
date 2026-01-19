@@ -1,407 +1,104 @@
-/*
- * ESP32-Dev Image Receiver via NRF24L01+
- * Receives image chunks and reassembles them
- * Uploads received images to web server
- */
-
+#include <Arduino.h>
 #include <SPI.h>
 #include <RF24.h>
-#include <SPIFFS.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <FastLED.h>
 
-// WiFi Configuration
-const char* ssid = "heyguyswhatsup";      // Change this
-const char* password = "myroommatesarecool";  // Change this
+const char* ssid = "heyguyswhatsup";
+const char* password = "myroommatesarecool";
+const char* flaskServerUrl = "http://192.168.0.198:5000/upload"; 
 
-// Web Server Configuration
-const char* serverUrl = "http://192.168.0.198:5000/upload";  // Change this to your server
-// Examples:
-// Local server: "http://192.168.1.100:5000/upload"
-// Cloud server: "https://yourserver.com/api/upload"
-// Python Flask default: "http://192.168.1.100:5000/upload"
+#define LED_PIN 48
+CRGB leds[1];
 
-// NRF24L01 Configuration
-#define CE_PIN 9    // Adjust based on your wiring
-#define CSN_PIN 10   // Adjust based on your wiring
-RF24 radio(CE_PIN, CSN_PIN);
+RF24 radio(9, 10); 
+const byte address[] = "00001";
 
-const byte address[6] = "00001";  // Must match sender - receive data on this
-const byte ackAddress[6] = "00002";  // Send ACKs on this
-
-// Packet structure (must match sender)
-#define PACKET_SIZE 32
-#define HEADER_SIZE 6
-#define PAYLOAD_SIZE (PACKET_SIZE - HEADER_SIZE)
-
-struct Packet {
-  uint8_t packetType;      // 0=start, 1=data, 2=end
-  uint16_t packetNumber;   // Sequential packet number
-  uint16_t totalPackets;   // Total packets for this image
-  uint8_t dataLength;      // Actual data length in this packet
-  uint8_t data[PAYLOAD_SIZE];
+uint16_t frame_buffer[76800]; 
+struct IndexedChunk {
+  uint32_t pixel_index;
+  uint16_t pixels[14];
 };
 
-// ACK packet structure (must match sender)
-struct AckPacket {
-  uint8_t ackType;         // 0=ACK (success), 1=NACK (retry), 2=READY
-  uint16_t packetNumber;   // Which packet is being acknowledged
-  uint8_t padding[29];     // Pad to 32 bytes
-};
-
-//function prototypes
-void handlePacket(Packet& packet);
-void handleStartPacket(Packet& packet);
-bool handleDataPacket(Packet& packet);
-void handleEndPacket(Packet& packet);
-void resetReceiver();
-bool uploadImageToServer(const char* filepath);
-void sendAck(uint16_t packetNum, bool success);
-//void sendImageOverSerial();
-
-// Image reception state
-bool receivingImage = false;
-uint16_t expectedPacket = 0;
-uint16_t totalPackets = 0;
-size_t totalBytesReceived = 0;
-File imageFile;
 unsigned long lastPacketTime = 0;
-const unsigned long TIMEOUT_MS = 5000;  // 5 second timeout
+bool hasNewData = false;
+
+void uploadToFlask() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  Serial.println("\n[HTTP] Transmission gap detected. Uploading frame...");
+  HTTPClient http;
+  http.begin(flaskServerUrl); 
+  http.addHeader("Content-Type", "application/octet-stream");
+  http.addHeader("X-Device-ID", "ESP32-S3-Receiver");
+
+  // Send the raw frame_buffer to the Python server
+  int httpResponseCode = http.POST((uint8_t*)frame_buffer, sizeof(frame_buffer));
+
+  if (httpResponseCode > 0) {
+    Serial.printf("[HTTP] Success! Server Response: %d\n", httpResponseCode);
+  } else {
+    Serial.printf("[HTTP] Failed. Error: %s\n", http.errorToString(httpResponseCode).c_str());
+  }
+  http.end();
+}
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("ESP32 NRF24 Receiver Initializing...");
+  FastLED.addLeds<WS2811, LED_PIN, GRB>(leds, 1);
+  leds[0] = CRGB::Red; FastLED.show();
 
-  // Initialize SPIFFS for image storage
-  if (!SPIFFS.begin(true)) {
-    Serial.println("SPIFFS initialization failed!");
-    while (1);
-  }
-  Serial.println("SPIFFS initialized");
-
-  // Connect to WiFi
-  Serial.print("Connecting to WiFi");
   WiFi.begin(ssid, password);
-  int wifiAttempts = 0;
-  while (WiFi.status() != WL_CONNECTED && wifiAttempts < 20) {
-    delay(500);
-    Serial.print(".");
-    wifiAttempts++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\nWiFi connection failed! Will save images locally only.");
-  }
+  while (WiFi.status() != WL_CONNECTED) { delay(100); Serial.print("."); }
+  Serial.println("\n[WIFI] Connected.");
 
-  // Initialize NRF24
-  //SPI.begin(14, 12, 13, 15);
-  if (!radio.begin()) {
-    Serial.println("NRF24 initialization failed!");
-    while (1);
-  }
-  
-  radio.setPALevel(RF24_PA_MAX);
-  radio.setDataRate(RF24_250KBPS);
-  radio.setChannel(108);
-  radio.openWritingPipe(ackAddress);     // Write ACKs on pipe "00002"
-  radio.openReadingPipe(1, address);     // Read data on pipe "00001"
+  radio.begin();
+  radio.setAutoAck(false);
+  radio.setChannel(115);
+  radio.setDataRate(RF24_2MBPS);
+  radio.openReadingPipe(1, address);
   radio.startListening();
-  
-  Serial.println("NRF24 initialized with ACK support");
-  Serial.println("  RX pipe: 00001 (data)");
-  Serial.println("  TX pipe: 00002 (ACKs)");
-  Serial.println("Waiting for images...");
+
+  leds[0] = CRGB::Green; FastLED.show();
+  Serial.println("[SYSTEM] Receiver listening...");
 }
 
 void loop() {
-  // Check for timeout
-  if (receivingImage && (millis() - lastPacketTime > TIMEOUT_MS)) {
-    Serial.println("Timeout! Resetting receiver");
-    resetReceiver();
-  }
-
-  // Check for incoming packets
   if (radio.available()) {
-    Packet packet;
-    radio.read(&packet, PACKET_SIZE);
+    IndexedChunk incoming;
+    radio.read(&incoming, sizeof(IndexedChunk));
+    
     lastPacketTime = millis();
-    
-    handlePacket(packet);
-  }
-}
+    hasNewData = true;
 
-void handlePacket(Packet& packet) {
-  bool success = false;
-  
-  switch (packet.packetType) {
-    case 0:  // START packet
-      handleStartPacket(packet);
-      success = true;
-      break;
-      
-    case 1:  // DATA packet
-      success = handleDataPacket(packet);
-      break;
-      
-    case 2:  // END packet
-      handleEndPacket(packet);
-      success = true;
-      break;
-      
-    default:
-      Serial.printf("Unknown packet type: %d\n", packet.packetType);
-      success = false;
-  }
-  
-  // Send ACK or NACK
-  sendAck(packet.packetNumber, success);
-}
+    if (incoming.pixel_index <= (76800 - 14)) {
+      for (int i = 0; i < 14; i++) {
+        uint16_t p = incoming.pixels[i];
+        
+        // 1. Separate the bytes (Camera is Big-Endian)
+        uint8_t highByte = p >> 8;
+        uint8_t lowByte  = p & 0xFF;
 
-void handleStartPacket(Packet& packet) {
-  Serial.println("\n=== Receiving new image ===");
-  Serial.printf("Total packets expected: %d\n", packet.totalPackets);
-  
-  // Clean up any previous reception
-  if (receivingImage) {
-    imageFile.close();
-  }
-  
-  // Open new file for writing
-  imageFile = SPIFFS.open("/received_image.jpg", FILE_WRITE);
-  if (!imageFile) {
-    Serial.println("Failed to open file for writing!");
-    return;
-  }
-  
-  receivingImage = true;
-  expectedPacket = 1;
-  totalPackets = packet.totalPackets;
-  totalBytesReceived = 0;
-}
+        // 2. Re-assemble as Little-Endian for the BMP format
+        // This is the standard way ESP32 stores 16-bit values in RAM
+        frame_buffer[incoming.pixel_index + i] = (lowByte << 8) | highByte;
+      }
 
-bool handleDataPacket(Packet& packet) {
-  if (!receivingImage) {
-    Serial.println("Received data packet but not in receiving mode!");
-    return false;
-  }
-  
-  // Verify packet sequence - CRITICAL for image integrity
-  if (packet.packetNumber != expectedPacket) {
-    Serial.printf("❌ PACKET ORDER ERROR! Expected %d, got %d - REJECTING\n", 
-                  expectedPacket, packet.packetNumber);
-    // DO NOT increment expectedPacket - we need THIS packet
-    return false;  // Send NACK to request correct packet
-  }
-  
-  // Verify data length is valid
-  if (packet.dataLength == 0 || packet.dataLength > PAYLOAD_SIZE) {
-    Serial.printf("❌ Invalid data length: %d - sending NACK\n", packet.dataLength);
-    return false;  // Send NACK
-  }
-  
-  // Write data to file
-  size_t written = imageFile.write(packet.data, packet.dataLength);
-  if (written != packet.dataLength) {
-    Serial.printf("❌ Write error! Expected %d, wrote %d - sending NACK\n", 
-                  packet.dataLength, written);
-    return false;  // Send NACK
-  }
-  
-  totalBytesReceived += written;
-  expectedPacket++;
-  
-  // Print progress every 50 packets
-  if (expectedPacket % 50 == 0) {
-    Serial.printf("✓ Progress: %d/%d packets, %d bytes\n", 
-                  expectedPacket - 1, totalPackets, totalBytesReceived);
-  }
-  
-  return true;  // Send ACK
-}
-
-void handleEndPacket(Packet& packet) {
-  if (!receivingImage) {
-    Serial.println("Received END packet but not in receiving mode!");
-    return;
-  }
-  
-  // END packet comes after all data packets, so it's packetNumber should be expectedPacket
-  Serial.printf("END packet received (packet #%d, expected #%d)\n", 
-                packet.packetNumber, expectedPacket);
-  
-  Serial.println("\n=== Image reception complete ===");
-  Serial.printf("Total packets received: %d/%d\n", expectedPacket - 1, totalPackets);
-  Serial.printf("Total bytes: %d\n", totalBytesReceived);
-  
-  imageFile.flush();  // Ensure all data is written
-  imageFile.close();
-  
-  // Display file info
-  File file = SPIFFS.open("/received_image.jpg", FILE_READ);
-  if (file) {
-    Serial.printf("Saved file size: %d bytes\n", file.size());
-    
-    // Verify it's a valid JPEG (starts with FF D8)
-    if (file.size() >= 2) {
-      uint8_t header[2];
-      file.read(header, 2);
-      if (header[0] == 0xFF && header[1] == 0xD8) {
-        Serial.println("✓ Valid JPEG header (FF D8)");
-      } else {
-        Serial.printf("❌ Invalid JPEG header: 0x%02X 0x%02X (expected FF D8)\n", header[0], header[1]);
+      // Progress tracking
+      if (incoming.pixel_index % 11200 == 0) {
+        Serial.printf("[DEBUG] Processing frame: %d%%\n", (incoming.pixel_index * 100) / 76800);
       }
-      
-      // Check JPEG footer (should end with FF D9)
-      if (file.size() >= 2) {
-        file.seek(file.size() - 2);
-        uint8_t footer[2];
-        file.read(footer, 2);
-        if (footer[0] == 0xFF && footer[1] == 0xD9) {
-          Serial.println("✓ Valid JPEG footer (FF D9)");
-        } else {
-          Serial.printf("❌ Invalid JPEG footer: 0x%02X 0x%02X (expected FF D9)\n", footer[0], footer[1]);
-          Serial.println("⚠️  Image may be incomplete or corrupted!");
-        }
-      }
-      
-      // Print first 16 bytes for debugging
-      file.seek(0);
-      Serial.print("First 16 bytes: ");
-      for (int i = 0; i < 16 && i < file.size(); i++) {
-        Serial.printf("%02X ", file.read());
-      }
-      Serial.println();
-    }
-    
-    file.close();
-    
-    Serial.println("Image saved as: /received_image.jpg");
-    
-    // Upload to web server
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nUploading to web server...");
-      if (uploadImageToServer("/received_image.jpg")) {
-        Serial.println("Upload successful!");
-      } else {
-        Serial.println("Upload failed!");
-      }
-    } else {
-      Serial.println("WiFi not connected. Image saved locally only.");
     }
   }
-  
-  receivingImage = false;
-}
 
-void resetReceiver() {
-  if (receivingImage && imageFile) {
-    imageFile.close();
-  }
-  
-  receivingImage = false;
-  expectedPacket = 0;
-  totalPackets = 0;
-  totalBytesReceived = 0;
-}
-
-// Send ACK or NACK to sender
-void sendAck(uint16_t packetNum, bool success) {
-  AckPacket ack;
-  ack.ackType = success ? 0 : 1;  // 0=ACK, 1=NACK
-  ack.packetNumber = packetNum;
-  memset(ack.padding, 0, sizeof(ack.padding));
-  
-  radio.stopListening();
-  bool sent = radio.write(&ack, sizeof(AckPacket));
-  radio.startListening();
-  
-  if (!sent) {
-    Serial.printf("Failed to send %s for packet %d\n", success ? "ACK" : "NACK", packetNum);
+  // GAP DETECTION: If we had data but haven't heard anything for 100ms
+  // it means the sender finished its loop and is in its delay() period.
+  if (hasNewData && (millis() - lastPacketTime > 100)) {
+    leds[0] = CRGB::Blue; FastLED.show();
+    uploadToFlask();
+    hasNewData = false; // Reset until next frame starts
+    leds[0] = CRGB::Green; FastLED.show();
+    Serial.println("[SYSTEM] Ready for next frame.");
   }
 }
-
-// Function to upload image to web server
-bool uploadImageToServer(const char* filepath) {
-  File file = SPIFFS.open(filepath, FILE_READ);
-  if (!file) {
-    Serial.println("Failed to open file for upload");
-    return false;
-  }
-  
-  size_t fileSize = file.size();
-  Serial.printf("Uploading %d bytes...\n", fileSize);
-  
-  // Read file into buffer
-  uint8_t* buffer = (uint8_t*)malloc(fileSize);
-  if (!buffer) {
-    Serial.println("Failed to allocate buffer");
-    file.close();
-    return false;
-  }
-  
-  size_t bytesRead = file.read(buffer, fileSize);
-  file.close();
-  
-  if (bytesRead != fileSize) {
-    Serial.printf("⚠️  File read mismatch: read %d, expected %d\n", bytesRead, fileSize);
-    free(buffer);
-    return false;
-  }
-  
-  // Verify JPEG integrity before upload
-  if (buffer[0] != 0xFF || buffer[1] != 0xD8) {
-    Serial.printf("❌ Buffer has invalid JPEG header: 0x%02X 0x%02X\n", buffer[0], buffer[1]);
-  }
-  if (buffer[fileSize-2] != 0xFF || buffer[fileSize-1] != 0xD9) {
-    Serial.printf("❌ Buffer has invalid JPEG footer: 0x%02X 0x%02X\n", 
-                  buffer[fileSize-2], buffer[fileSize-1]);
-  }
-  
-  HTTPClient http;
-  http.begin(serverUrl);
-  http.setTimeout(10000);  // 10 second timeout
-  
-  // Set content type for JPEG image
-  http.addHeader("Content-Type", "image/jpeg");
-  http.addHeader("Content-Length", String(fileSize));
-  http.addHeader("X-Device-ID", "ESP32-Receiver");
-  http.addHeader("X-Timestamp", String(millis()));
-  
-  // Send POST request
-  Serial.println("Sending HTTP POST...");
-  int httpResponseCode = http.POST(buffer, fileSize);
-  
-  free(buffer);
-  
-  if (httpResponseCode > 0) {
-    Serial.printf("HTTP Response code: %d\n", httpResponseCode);
-    String response = http.getString();
-    Serial.println("Server response: " + response);
-    http.end();
-    return (httpResponseCode == 200 || httpResponseCode == 201);
-  } else {
-    Serial.printf("HTTP Error: %s\n", http.errorToString(httpResponseCode).c_str());
-    http.end();
-    return false;
-  }
-}
-
-// Function to send image over Serial (for testing/debugging)
-// void sendImageOverSerial() {
-//   File file = SPIFFS.open("/received_image.jpg", FILE_READ);
-//   if (!file) {
-//     Serial.println("No image file found!");
-//     return;
-//   }
-  
-//   Serial.println("Sending image over serial...");
-//   while (file.available()) {
-//     Serial.write(file.read());
-//   }
-//   file.close();
-//   Serial.println("\nImage sent!");
-// }

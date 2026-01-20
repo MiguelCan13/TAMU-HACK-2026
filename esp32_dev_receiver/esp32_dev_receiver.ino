@@ -63,7 +63,8 @@ void setup() {
   radio.setAutoAck(false);
   radio.setChannel(115);
   radio.setDataRate(RF24_2MBPS);
-  radio.openReadingPipe(1, address);
+  radio.openWritingPipe(address);      // For sending poll requests
+  radio.openReadingPipe(1, address);   // For receiving data
   radio.startListening();
 
   leds[0] = CRGB::Green; FastLED.show();
@@ -72,20 +73,22 @@ void setup() {
 
 void loop() {
   if (radio.available()) {
-    IndexedChunk incoming;
     //there are 2 nodes, in order to not recieve 2 different images at the same time,
     //each node will have an id and the reciever will alternate between them, checking if 
     //data is ready to be recieved. This will be done by sending the register of the node
     //and if the node recieves its register back it will send data, otherwise it will wait.
 
     //check to see which node is ready to send data
+    uint8_t identity;
     while(true){
       for(int i = 0; i < sizeof(nodes); i++){
+        radio.stopListening();  // Switch to TX mode
         radio.write(&nodes[i], sizeof(uint8_t));
+        radio.startListening(); // Switch back to RX mode
         delay(10); //give some time for the node to respond
         if(radio.available()){
-          radio.read(&incoming, sizeof(uint8_t));
-          if(incoming == nodes[i]){
+          radio.read(&identity, sizeof(uint8_t));
+          if(identity == nodes[i]){
             //node is ready to send data
             Serial.printf("[SYSTEM] Incoming package from Node %d.\n", nodes[i]);
             break;
@@ -93,6 +96,8 @@ void loop() {
         }
       }
     }
+    IndexedChunk incoming;
+
 
     lastPacketTime = millis();
     hasNewData = true;

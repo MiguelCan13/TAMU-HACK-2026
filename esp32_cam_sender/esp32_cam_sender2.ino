@@ -97,6 +97,7 @@ void setup() {
   radio.setDataRate(RF24_2MBPS);
   radio.setPALevel(RF24_PA_MAX);
   radio.openWritingPipe(address);
+  radio.openReadingPipe(1, address);  // For receiving poll requests
   radio.stopListening();
   Serial.println("Sender Ready.");
 }
@@ -126,10 +127,13 @@ void loop() {
     uint8_t incoming_id;
     while(true){
       Serial.println("Waiting for receiver...");
+      radio.startListening();  // Switch to RX mode to receive poll
+      delay(10);
       if(radio.available()){
         radio.read(&incoming_id, sizeof(uint8_t));
         if(incoming_id == node_id){
           //reciever is ready to recieve data
+          radio.stopListening();  // Switch to TX mode
           radio.write(&node_id, sizeof(uint8_t)); //send back the register to confirm
           Serial.println("Receiver ready, sending data...");
           break;

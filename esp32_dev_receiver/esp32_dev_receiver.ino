@@ -15,7 +15,7 @@ CRGB leds[1];
 RF24 radio(9, 10); 
 const byte address[] = "00001";
 
-uint16_t frame_buffer[76800]; 
+uint16_t frame_buffer[19200]; 
 struct IndexedChunk {
   uint32_t pixel_index;
   uint16_t pixels[14];
@@ -72,65 +72,68 @@ void setup() {
 }
 
 void loop() {
-  if (radio.available()) {
-    //there are 2 nodes, in order to not recieve 2 different images at the same time,
-    //each node will have an id and the reciever will alternate between them, checking if 
-    //data is ready to be recieved. This will be done by sending the register of the node
-    //and if the node recieves its register back it will send data, otherwise it will wait.
+  uint8_t identity = 0;
+  bool nodeFound = false;
 
-    //check to see which node is ready to send data
-    uint8_t identity;
-    while(true){
-      for(int i = 0; i < sizeof(nodes); i++){
-        radio.stopListening();  // Switch to TX mode
-        radio.write(&nodes[i], sizeof(uint8_t));
-        radio.startListening(); // Switch back to RX mode
-        delay(10); //give some time for the node to respond
-        if(radio.available()){
-          radio.read(&identity, sizeof(uint8_t));
-          if(identity == nodes[i]){
-            //node is ready to send data
-            Serial.printf("[SYSTEM] Incoming package from Node %d.\n", nodes[i]);
-            break;
-          }
+  // 1. Poll the nodes to see who is ready
+  //there are 2 nodes, in order to not recieve 2 different images at the same time,
+  //each node will have an id and the reciever will alternate between them, checking if 
+  //data is ready to be recieved. This will be done by sending the register of the node
+  //and if the node recieves its register back it will send data, otherwise it will wait.
+
+  //check to see which node is ready to send data
+  for (int i = 0; i < sizeof(nodes); i++) {
+    radio.stopListening();
+    uint8_t targetNode = nodes[i];
+    radio.write(&targetNode, sizeof(uint8_t)); // Send poll [cite: 67]
+    
+    radio.startListening();
+    unsigned long startWait = millis();
+    while (millis() - startWait < 15) { // 15ms window to hear back [cite: 69]
+      if (radio.available()) {
+        radio.read(&identity, sizeof(uint8_t));
+        if (identity == targetNode) {
+          nodeFound = true;
+          Serial.printf("[SYSTEM] Node %d is ready.\n", targetNode); [cite: 70]
+          break;
         }
       }
     }
-    IndexedChunk incoming;
+    if (nodeFound) break;
+  }
 
-
+  // 2. If a node responded, receive the image chunks
+  if (nodeFound) {
     lastPacketTime = millis();
     hasNewData = true;
-    radio.read(&incoming, sizeof(IndexedChunk));
     
-
-    if (incoming.pixel_index <= (76800 - 14)) {
-      for (int i = 0; i < 14; i++) {
-        uint16_t p = incoming.pixels[i];
+    // Updated limit for QQVGA (160x120 = 19200 pixels)
+    uint32_t pixelsReceived = 0;
+    while (pixelsReceived < 19200) { 
+      if (radio.available()) {
+        IndexedChunk incoming;
+        radio.read(&incoming, sizeof(IndexedChunk)); [cite: 72]
         
-        // 1. Separate the bytes (Camera is Big-Endian)
-        uint8_t highByte = p >> 8;
-        uint8_t lowByte  = p & 0xFF;
-
-        // 2. Re-assemble as Little-Endian for the BMP format
-        // This is the standard way ESP32 stores 16-bit values in RAM
-        frame_buffer[incoming.pixel_index + i] = (lowByte << 8) | highByte;
+        if (incoming.pixel_index <= (19200 - 14)) {
+          for (int i = 0; i < 14; i++) {
+            uint16_t p = incoming.pixels[i];
+            uint8_t highByte = p >> 8; [cite: 73]
+            uint8_t lowByte  = p & 0xFF; [cite: 74]
+            frame_buffer[incoming.pixel_index + i] = (lowByte << 8) | highByte; [cite: 75]
+          }
+          pixelsReceived += 14;
+          lastPacketTime = millis(); // Refresh timeout
+        }
       }
-
-      // Progress tracking
-      if (incoming.pixel_index % 11200 == 0) {
-        Serial.printf("[DEBUG] Processing frame: %d%%\n", (incoming.pixel_index * 100) / 76800);
-      }
+      
+      // Safety exit if sender stops mid-frame
+      if (millis() - lastPacketTime > 200) break; 
     }
   }
 
-  // GAP DETECTION: If we had data but haven't heard anything for 100ms
-  // it means the sender finished its loop and is in its delay() period.
+  // 3. Gap detection for upload [cite: 77, 78]
   if (hasNewData && (millis() - lastPacketTime > 100)) {
-    leds[0] = CRGB::Blue; FastLED.show();
     uploadToFlask();
-    hasNewData = false; // Reset until next frame starts
-    leds[0] = CRGB::Green; FastLED.show();
-    Serial.println("[SYSTEM] Ready for next frame.");
+    hasNewData = false;
   }
 }

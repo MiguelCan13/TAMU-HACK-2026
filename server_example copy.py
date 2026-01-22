@@ -1,12 +1,16 @@
 from flask import Flask, request, jsonify
 import os
 from datetime import datetime
+from ultralytics import YOLO
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = 'uploadsss'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
+
+image_path = "ultralytics\\Screenshot 2026-01-21 193037.png"
+model = YOLO("yolo11n.pt")
 
 # 66-byte BMP Header for 16-bit RGB565 (Corrected for bit-mask alignment)
 BMP_HEADER = bytes([
@@ -51,8 +55,18 @@ def upload_image():
         
         # SEND DATA BACK TO ESP32
         # Examples of what you can send:
+        results = model.predict(
+            source=image_path,
+            classes=[2,7,3],
+            conf=0.25,          # Confidence threshold
+            save=True,          # Save the result image with bounding boxes
+            show=True,          # Display the result
+            save_txt=True,      # Save detection results to txt file
+            save_conf=True      # Save confidence scores
+        )
+
         response_data = {
-            'num_cars': 67
+            'num_cars': results[0].boxes.shape[0]  # Number of detected objects
         }
         
         return jsonify(response_data), 200

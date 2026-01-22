@@ -9,7 +9,7 @@ const char* ssid = "heyguyswhatsup";
 const char* password = "myroommatesarecool";
 const char* flaskServerUrl = "http://192.168.0.198:5000/upload"; 
 
-#define LED_PIN 48
+#define LED_PIN 38
 CRGB leds[1];
 
 RF24 radio(9, 10); 
@@ -44,6 +44,15 @@ void uploadToFlask() {
 
   if (httpResponseCode > 0) {
     Serial.printf("[HTTP] Success! Server Response: %d\n", httpResponseCode);
+    
+    // READ RESPONSE FROM SERVER
+    String response = http.getString();
+    Serial.println("[SERVER RESPONSE] " + response);
+    
+    // Example: Parse simple JSON response (you can add ArduinoJson for complex parsing)
+    int num_cars = response.indexOf("\"num_cars\":");
+    Serial.printf("[INFO] Number of cars detected: %d\n", num_cars);
+    
   } else {
     Serial.printf("[HTTP] Failed. Error: %s\n", http.errorToString(httpResponseCode).c_str());
   }
@@ -94,7 +103,7 @@ void loop() {
         radio.read(&identity, sizeof(uint8_t));
         if (identity == targetNode) {
           nodeFound = true;
-          Serial.printf("[SYSTEM] Node %d is ready.\n", targetNode); [cite: 70]
+          Serial.printf("[SYSTEM] Node %d is ready.\n", targetNode); 
           break;
         }
       }
@@ -112,14 +121,14 @@ void loop() {
     while (pixelsReceived < 19200) { 
       if (radio.available()) {
         IndexedChunk incoming;
-        radio.read(&incoming, sizeof(IndexedChunk)); [cite: 72]
+        radio.read(&incoming, sizeof(IndexedChunk)); 
         
         if (incoming.pixel_index <= (19200 - 14)) {
           for (int i = 0; i < 14; i++) {
             uint16_t p = incoming.pixels[i];
-            uint8_t highByte = p >> 8; [cite: 73]
-            uint8_t lowByte  = p & 0xFF; [cite: 74]
-            frame_buffer[incoming.pixel_index + i] = (lowByte << 8) | highByte; [cite: 75]
+            uint8_t highByte = p >> 8; 
+            uint8_t lowByte  = p & 0xFF; 
+            frame_buffer[incoming.pixel_index + i] = (lowByte << 8) | highByte; 
           }
           pixelsReceived += 14;
           lastPacketTime = millis(); // Refresh timeout

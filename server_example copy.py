@@ -4,7 +4,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = 'uploadss'
+UPLOAD_FOLDER = 'uploadsss'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
@@ -48,7 +48,14 @@ def upload_image():
             f.write(image_data) # Append the raw pixels
         
         print(f"Saved: {filename} ({len(image_data)} bytes)")
-        return jsonify({'success': True}), 200
+        
+        # SEND DATA BACK TO ESP32
+        # Examples of what you can send:
+        response_data = {
+            'num_cars': 67
+        }
+        
+        return jsonify(response_data), 200
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

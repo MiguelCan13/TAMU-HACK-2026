@@ -3,7 +3,6 @@
 ###
 from ultralytics import YOLO
 
-model = YOLO("yolo11n-cls.pt") #model for classification
 
 # test = model.track(
 #     source = 0,  #use personal webcam
@@ -11,15 +10,19 @@ model = YOLO("yolo11n-cls.pt") #model for classification
 #     show = True  #display results
 # )
 
+###CHANGE MODEL IF YOU ALREADY HAVE A TRAINED ONE
+model = YOLO("yolo11n-cls.pt") #model for classification
+
+
 # Train the model
 results = model.train(
     data="ultralytics/car orientation data",
-    epochs=50,               # Number of training epochs (cycles)
+    epochs=1,               # Number of training epochs (cycles)
     imgsz=224,               
     name="car_orientation",   # Name of the training run
     save=True,               # Save checkpoints
     plots=True,              # Generate training plots
-    device=0,                # Use GPU 0 (change to 'cpu' if no GPU)
+    device="cpu",                # Use GPU 0 (change to 'cpu' if no GPU)
 )
 
 # Save the trained model

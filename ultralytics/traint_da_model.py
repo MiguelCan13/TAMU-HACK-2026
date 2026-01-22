@@ -10,30 +10,30 @@ from ultralytics import YOLO
 
 
 if __name__ == '__main__':
-    #test = model.track(
-    #   source = 0,  #use personal webcam
-    #   conf = .25,  #confidence threshold
-    #   show = True  #display results
-    # )
+   
     
     ###CHANGE MODEL IF YOU ALREADY HAVE A PRETRAINED ONE, otherwise use "yolo11n-cls.pt" for classification tasks
     model = YOLO("ultralytics/car_orientation_model.pt")  
 
+    #test model
+    results = model(source="ultralytics/Screenshot 2026-01-21 193037.png")
+    print(results[0].probs)  # Print classification probabilities
+
     # Train the model
-    results = model.train(
-        data="ultralytics/car orientation data",
-        epochs=50,               # Number of training epochs (cycles)
-        imgsz=224,               
-        name="car_orientation",   # Name of the training run
-        save=True,               # Save checkpoints
-        plots=True,              # Generate training plots
-        device=0,                # Use GPU 0 (change to 'cpu' if no GPU)
-    )
+    # results = model.train(
+    #     data="ultralytics/car orientation data",
+    #     epochs=50,               # Number of training epochs (cycles)
+    #     imgsz=224,               
+    #     name="car_orientation",   # Name of the training run
+    #     save=True,               # Save checkpoints
+    #     plots=True,              # Generate training plots
+    #     device=0,                # Use GPU 0 (change to 'cpu' if no GPU)
+    # )
 
     # Save the trained model CHANGE THIS IF YOUR MAKING A NEW VERSION
-    model.save("car_orientation_model.pt")
+    # model.save("car_orientation_model.pt")
 
-    print("\n" + "="*50)
-    print("Training Complete!")
-    print(f"Best model saved at: runs/classify/car_orientation/weights/best.pt")
-    print("="*50)
+    # print("\n" + "="*50)
+    # print("Training Complete!")
+    # print(f"Best model saved at: runs/classify/car_orientation/weights/best.pt")
+    # print("="*50)

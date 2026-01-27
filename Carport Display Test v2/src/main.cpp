@@ -8,9 +8,9 @@
 #include <ui.h>
 #include <ESP32Encoder.h>
 
-const char* ssid = "heyguyswhatsup";
-const char* password = "myroommatesarecool";
-const char* flaskServerUrl = "http://192.168.0.198:5000/upload"; 
+const char* ssid = "SM-G950U7AD";
+const char* password = "361 658 6872";
+const char* flaskServerUrl = "http://10.124.30.48:5000/upload"; 
 
 RF24 radio(9, 10); 
 const byte address[] = "00001";

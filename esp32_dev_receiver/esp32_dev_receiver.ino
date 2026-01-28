@@ -27,6 +27,8 @@ struct Node{
 
 uint8_t nodes[] = {1, 2};
 
+#define TUAH_BYTE 0xAA  
+
 unsigned long lastPacketTime = 0;
 bool hasNewData = false;
 
@@ -345,10 +347,12 @@ void handle_image_process() {
     //check to see which node is ready to send data
     for (int i = 0; i < sizeof(nodes); i++) {
         radio.stopListening();
+        delayMicroseconds(50); // Allow mode switch to settle
         uint8_t targetNode = nodes[i];
         radio.write(&targetNode, sizeof(uint8_t)); // Send poll [cite: 67]
         
         radio.startListening();
+        delayMicroseconds(50); // Allow mode switch to settle
         unsigned long startWait = millis();
         while (millis() - startWait < 15) { // 15ms window to hear back [cite: 69]
         if (radio.available()) {
@@ -369,6 +373,9 @@ void handle_image_process() {
         lastPacketTime = millis();
         hasNewData = true;
         
+        // Clear any stale data and ensure clean state
+        radio.flush_rx();
+        
         // Updated limit for QQVGA (160x120 = 19200 pixels)
         uint32_t pixelsReceived = 0;
         while (pixelsReceived < 19200) { 
@@ -385,6 +392,14 @@ void handle_image_process() {
             }
             pixelsReceived += 14;
             lastPacketTime = millis(); // Refresh timeout
+
+            // Send ACK back to sender
+            radio.stopListening();
+            delayMicroseconds(50); // Allow mode switch to settle
+            uint8_t ack = TUAH_BYTE;
+            radio.write(&ack, sizeof(uint8_t));
+            radio.startListening();
+            delayMicroseconds(50); // Allow mode switch to settle
             }
         }
         
@@ -397,6 +412,10 @@ void handle_image_process() {
     if (hasNewData && (millis() - lastPacketTime > 100)) {
         uploadToFlask();
         hasNewData = false;
+        
+        // Reset radio to clean state
+        radio.flush_rx(); // Clear any stale packets
+        radio.startListening(); // Ensure we're listening for next poll
     }
 }
 

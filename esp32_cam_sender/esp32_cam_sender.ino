@@ -23,7 +23,7 @@
 
 #define TRIG_PIN 4  
 #define ECHO_PIN 16 
-#define THRESHOLD_CM 350
+#define THRESHOLD_CM 30
 
 long getDistance() {
   pinMode(TRIG_PIN, OUTPUT);
@@ -49,6 +49,8 @@ struct IndexedChunk {
   uint32_t pixel_index; 
   uint16_t pixels[14];  
 }; 
+
+#define TUAH_BYTE 0xAA  // Acknowledgment signal
 
 //there are 2 different camera modules. Each module has a register(ID num) 
 const uint8_t node_id = 2;
@@ -123,36 +125,78 @@ void loop() {
     uint16_t* raw_pixels = (uint16_t*)fb->buf;
     IndexedChunk chunk;
 
+    // Ensure clean radio state before polling
+    radio.flush_tx();
+    radio.flush_rx();
+
     //wait to recieve the register request from the reciever
     uint8_t incoming_id;
+    Serial.println("Waiting for receiver...");
+    radio.startListening();  // Switch to RX mode to receive poll once
     while(true){
-      Serial.println("Waiting for receiver...");
-      radio.startListening();  // Switch to RX mode to receive poll
-      delay(10);
       if(radio.available()){
         radio.read(&incoming_id, sizeof(uint8_t));
         if(incoming_id == node_id){
-          delay(2);
           //reciever is ready to recieve data
           radio.stopListening();  // Switch to TX mode
+          delayMicroseconds(100); // Allow mode switch to settle
           radio.write(&node_id, sizeof(uint8_t)); //send back the register to confirm
           Serial.println("Receiver ready, sending data...");
           break;
         }
       }
+      delayMicroseconds(100); // Small delay to prevent busy-waiting
     }
 
-    for (uint32_t i = 0; i < 19200; i += 14) {
+    // Send in chunks of 14, but only up to 19186 (last valid starting index)
+    for (uint32_t i = 0; i <= 19186; i += 14) {
       chunk.pixel_index = i;
       for (int j = 0; j < 14; j++) {
         if (i + j < 19200) chunk.pixels[j] = raw_pixels[i + j];
       }
-      radio.write(&chunk, sizeof(IndexedChunk));
-      delayMicroseconds(100); // Crucial: Gives receiver time to process
+      // Send chunk and wait for ACK
+      bool ackReceived = false;
+      int retries = 0;
+      while (!ackReceived && retries < 10) {
+        radio.stopListening();
+        delayMicroseconds(50); // Allow mode switch to settle
+        bool sent = radio.write(&chunk, sizeof(IndexedChunk));
+        
+        // Wait for ACK
+        radio.startListening();
+        delayMicroseconds(50); // Allow mode switch to settle
+        unsigned long ackTimeout = millis();
+        while (millis() - ackTimeout < 15) {  // Increased to 15ms to match receiver
+          if (radio.available()) {
+            uint8_t ack;
+            radio.read(&ack, sizeof(uint8_t));
+            if (ack == TUAH_BYTE) {
+              ackReceived = true;
+              break;
+            }
+          }
+        }
+        
+        if (!ackReceived) {
+          retries++;
+          Serial.printf("Retry %d for chunk %d\n", retries, i);
+          delayMicroseconds(500);
+        }
+      }
+      
+      if (!ackReceived) {
+        Serial.printf("Failed to send chunk %d after 10 retries\n", i);
+      }
     }
       esp_camera_fb_return(fb);
-      Serial.println("Frame sent. Waiting 100us...");
-      delayMicroseconds(100); 
+      Serial.println("Frame sent. Waiting for receiver to process...");
+      
+      // Flush any stale data and reset to clean state
+      radio.flush_tx();
+      radio.flush_rx();
+      radio.stopListening(); // Ensure we're in TX mode for next poll
+      
+      delay(200); // Give receiver time to process and upload
   }
   delay(500);
 }

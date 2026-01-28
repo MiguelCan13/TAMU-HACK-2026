@@ -23,7 +23,7 @@
 
 #define TRIG_PIN 4  
 #define ECHO_PIN 16 
-#define THRESHOLD_CM 30
+#define THRESHOLD_CM 350
 
 long getDistance() {
   pinMode(TRIG_PIN, OUTPUT);
@@ -51,7 +51,7 @@ struct IndexedChunk {
 }; 
 
 //there are 2 different camera modules. Each module has a register(ID num) 
-const uint8_t node_id = 1;
+const uint8_t node_id = 2;
 
 void setup() {
   Serial.begin(115200);
@@ -95,7 +95,7 @@ void setup() {
   radio.setAutoAck(false);
   radio.setChannel(115);
   radio.setDataRate(RF24_2MBPS);
-  radio.setPALevel(RF24_PA_MAX);
+  radio.setPALevel(RF24_PA_LOW);
   radio.openWritingPipe(address);
   radio.openReadingPipe(1, address);  // For receiving poll requests
   radio.stopListening();

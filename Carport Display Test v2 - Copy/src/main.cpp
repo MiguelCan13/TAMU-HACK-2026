@@ -235,6 +235,8 @@ void setup()
     indev_drv.read_cb = my_touchpad_read;
     lv_indev_drv_register( &indev_drv );
 
+    ui_init();
+
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) { delay(100); Serial.print("."); }
     Serial.println("\n[WIFI] Connected.");
@@ -243,11 +245,11 @@ void setup()
     radio.setAutoAck(false);
     radio.setChannel(115);
     radio.setDataRate(RF24_2MBPS);
+    radio.setPALevel(RF24_PA_LOW);   
     radio.openWritingPipe(address);      // For sending poll requests
     radio.openReadingPipe(1, address);   // For receiving data
     radio.startListening();
- 
-    ui_init();
+
 
     Serial.println( "Setup done" );
     Serial.println("[SYSTEM] Receiver listening...");

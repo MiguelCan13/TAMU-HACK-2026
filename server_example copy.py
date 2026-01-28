@@ -57,18 +57,31 @@ def upload_image():
         parking_data['lot_name'] = request.headers.get('X-Lot-Name', 'Unknown Lot')
         parking_data['total_spots'] = request.headers.get('X-Max-Spots', '20')
         parking_data['occupied_spots'] = request.headers.get('X-Available-Spots', '20')
-                
+        
+        content_type = request.headers.get('Content-Type', '')
+        
         print(f"[CAMERA {parking_data['camera-triggered']}] Received image for {parking_data['lot_name']} (Max: {parking_data['total_spots']} spots)")
  
-        # Save as .bmp and prepend the header so it is viewable
-        filename = f"{parking_data['camera-triggered']}_{datetime.now().strftime('%H%M%S')}.bmp"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        
-        with open(filepath, 'wb') as f:
-            f.write(BMP_HEADER) # Add the header first
-            f.write(image_data) # Append the raw pixels
-        
-        print(f"Saved: {filename} ({len(image_data)} bytes)")
+        # Check if it's JPEG or raw RGB565
+        if 'jpeg' in content_type.lower():
+            # Save as JPEG directly
+            filename = f"{parking_data['camera-triggered']}_{datetime.now().strftime('%H%M%S')}.jpg"
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            
+            with open(filepath, 'wb') as f:
+                f.write(image_data)  # JPEG data is already complete
+            
+            print(f"Saved JPEG: {filename} ({len(image_data)} bytes)")
+        else:
+            # Save as .bmp and prepend the header (for legacy RGB565)
+            filename = f"{parking_data['camera-triggered']}_{datetime.now().strftime('%H%M%S')}.bmp"
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            
+            with open(filepath, 'wb') as f:
+                f.write(BMP_HEADER) # Add the header first
+                f.write(image_data) # Append the raw pixels
+            
+            print(f"Saved BMP: {filename} ({len(image_data)} bytes)")
         
         # Run YOLO detection
         results = model.predict(

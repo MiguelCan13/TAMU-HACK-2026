@@ -15,11 +15,19 @@ const char* flaskServerUrl = "http://10.124.30.48:5000/upload";
 RF24 radio(9, 10); 
 const byte address[] = "00001";
 
-uint16_t frame_buffer[19200]; 
-struct IndexedChunk {
-  uint32_t pixel_index;
-  uint16_t pixels[14];
+struct ImageHeader {
+  uint32_t total_size;  // Total JPEG size in bytes
+  uint32_t chunk_count; // Number of chunks to expect
 };
+
+struct IndexedChunk {
+  uint32_t chunk_index; // Which chunk this is
+  uint8_t data[28];     // JPEG byte data
+};
+
+uint8_t jpeg_buffer[65536]; // 64KB buffer for JPEG (adjust if needed)
+ImageHeader current_header;
+bool chunk_received[3000]; // Track which chunks we've received
 
 struct Node{
   uint8_t id;
@@ -86,30 +94,28 @@ void my_print(const char * buf)
 void uploadToFlask() {
     if (WiFi.status() != WL_CONNECTED) return;
 
-    Serial.println("\n[HTTP] Transmission gap detected. Uploading frame...");
+    Serial.println("\n[HTTP] Transmission gap detected. Uploading JPEG...");
     HTTPClient http;
     http.begin(flaskServerUrl); 
 
     int val = node_id;
     char buffer[5];
     itoa(val, buffer, 10);
-    http.addHeader("X-Camera-ID", buffer);           // Change this for each camera
+    http.addHeader("X-Camera-ID", buffer);
+    http.addHeader("Content-Type", "image/jpeg"); // Specify JPEG content
 
-    http.addHeader("X-Lot-Name", lots[current_idx].lot_name); // send lot name
+    http.addHeader("X-Lot-Name", lots[current_idx].lot_name);
 
     val = lots[current_idx].num_spots;
-    buffer[5];
     itoa(val, buffer, 10);
-    http.addHeader("X-Max-Spots", buffer);               // Maximum capacity for this lot
+    http.addHeader("X-Max-Spots", buffer);
 
     val = lots[current_idx].num_spots - available_spots;
-    buffer[5];
     itoa(val, buffer, 10);
-
     http.addHeader("X-Available-Spots", buffer);
 
-    // Send the raw frame_buffer to the Python server
-    int httpResponseCode = http.POST((uint8_t*)frame_buffer, sizeof(frame_buffer));
+    // Send the JPEG data to the Python server
+    int httpResponseCode = http.POST(jpeg_buffer, current_header.total_size);
 
     if (httpResponseCode > 0) {
         Serial.printf("[HTTP] Success! Server Response: %d\n", httpResponseCode);
@@ -376,35 +382,104 @@ void handle_image_process() {
         // Clear any stale data and ensure clean state
         radio.flush_rx();
         
-        // Updated limit for QQVGA (160x120 = 19200 pixels)
-        uint32_t pixelsReceived = 0;
-        while (pixelsReceived < 19200) { 
-        if (radio.available()) {
-            IndexedChunk incoming;
-            radio.read(&incoming, sizeof(IndexedChunk)); 
-            
-            if (incoming.pixel_index <= (19200 - 14)) {
-            for (int i = 0; i < 14; i++) {
-                uint16_t p = incoming.pixels[i];
-                uint8_t highByte = p >> 8; 
-                uint8_t lowByte  = p & 0xFF; 
-                frame_buffer[incoming.pixel_index + i] = (lowByte << 8) | highByte; 
-            }
-            pixelsReceived += 14;
-            lastPacketTime = millis(); // Refresh timeout
-
-            // Send ACK back to sender
-            radio.stopListening();
-            delayMicroseconds(50); // Allow mode switch to settle
-            uint8_t ack = TUAH_BYTE;
-            radio.write(&ack, sizeof(uint8_t));
-            radio.startListening();
-            delayMicroseconds(50); // Allow mode switch to settle
+        // First, receive the image header
+        bool headerReceived = false;
+        unsigned long headerTimeout = millis();
+        while (millis() - headerTimeout < 200) {
+            if (radio.available()) {
+                radio.read(&current_header, sizeof(ImageHeader));
+                Serial.printf("[HEADER] Size: %d bytes, Chunks: %d\n", 
+                             current_header.total_size, current_header.chunk_count);
+                
+                // Send ACK for header
+                radio.stopListening();
+                delayMicroseconds(50);
+                uint8_t ack = TUAH_BYTE;
+                radio.write(&ack, sizeof(uint8_t));
+                radio.startListening();
+                delayMicroseconds(50);
+                
+                headerReceived = true;
+                lastPacketTime = millis();
+                break;
             }
         }
         
-        // Safety exit if sender stops mid-frame
-        if (millis() - lastPacketTime > 200) break; 
+        if (!headerReceived) {
+            Serial.println("[ERROR] Failed to receive header");
+            return;
+        }
+        
+        // Receive JPEG chunks
+        memset(chunk_received, false, sizeof(chunk_received)); // Clear tracking
+        uint32_t chunksReceived = 0;
+        uint32_t lastChunkIndex = 0;
+        
+        while (chunksReceived < current_header.chunk_count) {
+            if (radio.available()) {
+                IndexedChunk incoming;
+                radio.read(&incoming, sizeof(IndexedChunk));
+                
+                // Validate chunk index
+                if (incoming.chunk_index >= current_header.chunk_count) {
+                    Serial.printf("[ERROR] Invalid chunk index: %d\n", incoming.chunk_index);
+                    continue;
+                }
+                
+                // Check for duplicate
+                if (chunk_received[incoming.chunk_index]) {
+                    Serial.printf("[WARN] Duplicate chunk: %d\n", incoming.chunk_index);
+                    // Still send ACK
+                    radio.stopListening();
+                    delayMicroseconds(50);
+                    uint8_t ack = TUAH_BYTE;
+                    radio.write(&ack, sizeof(uint8_t));
+                    radio.startListening();
+                    delayMicroseconds(50);
+                    continue;
+                }
+                
+                // Copy chunk data into JPEG buffer
+                uint32_t byte_offset = incoming.chunk_index * 28;
+                uint32_t bytes_remaining = current_header.total_size - byte_offset;
+                uint32_t bytes_to_copy = (bytes_remaining < 28) ? bytes_remaining : 28;
+                
+                // Boundary check
+                if (byte_offset + bytes_to_copy > sizeof(jpeg_buffer)) {
+                    Serial.printf("[ERROR] Buffer overflow at chunk %d\n", incoming.chunk_index);
+                    break;
+                }
+                
+                memcpy(&jpeg_buffer[byte_offset], incoming.data, bytes_to_copy);
+                chunk_received[incoming.chunk_index] = true;
+                chunksReceived++;
+                lastPacketTime = millis();
+                
+                // Send ACK back to sender
+                radio.stopListening();
+                delayMicroseconds(50);
+                uint8_t ack = TUAH_BYTE;
+                radio.write(&ack, sizeof(uint8_t));
+                radio.startListening();
+                delayMicroseconds(50);
+            }
+            
+            // Safety exit if sender stops mid-frame
+            if (millis() - lastPacketTime > 200) break;
+        }
+        
+        // Check for missing chunks
+        Serial.printf("[SYSTEM] Received %d/%d chunks\n", 
+                     chunksReceived, current_header.chunk_count);
+        
+        if (chunksReceived < current_header.chunk_count) {
+            Serial.print("[ERROR] Missing chunks: ");
+            for (uint32_t i = 0; i < current_header.chunk_count; i++) {
+                if (!chunk_received[i]) {
+                    Serial.printf("%d ", i);
+                }
+            }
+            Serial.println();
         }
     }
 

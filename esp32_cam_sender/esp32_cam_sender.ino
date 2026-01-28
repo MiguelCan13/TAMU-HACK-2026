@@ -45,9 +45,14 @@ long getDistance() {
 RF24 radio(2, 15); 
 const byte address[] = "00001";
 
+struct ImageHeader {
+  uint32_t total_size;  // Total JPEG size in bytes
+  uint32_t chunk_count; // Number of chunks to expect
+};
+
 struct IndexedChunk {
-  uint32_t pixel_index; 
-  uint16_t pixels[14];  
+  uint32_t chunk_index; // Which chunk this is (0, 1, 2...)
+  uint8_t data[28];     // JPEG byte data (increased from 14 uint16_t)
 }; 
 
 #define TUAH_BYTE 0xAA  // Acknowledgment signal
@@ -74,8 +79,9 @@ void setup() {
   config.pin_sscb_sda = SIOD_GPIO_NUM; config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_RGB565;
-  config.frame_size = FRAMESIZE_QQVGA; 
+  config.pixel_format = PIXFORMAT_JPEG;  // Changed to JPEG
+  config.frame_size = FRAMESIZE_VGA;     // VGA (640x480)
+  config.jpeg_quality = 20;              // Balanced quality/size for VGA
   config.fb_count = 1;
   config.fb_location = CAMERA_FB_IN_DRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
@@ -122,8 +128,12 @@ void loop() {
 
     if (!fb) return;
 
-    uint16_t* raw_pixels = (uint16_t*)fb->buf;
-    IndexedChunk chunk;
+    Serial.printf("Captured JPEG: %d bytes\n", fb->len);
+    
+    // Warn if JPEG is too large for reliable transmission
+    if (fb->len > 20000) {
+      Serial.println("WARNING: JPEG too large, may be unreliable!");
+    }
 
     // Ensure clean radio state before polling
     radio.flush_tx();
@@ -148,25 +158,68 @@ void loop() {
       delayMicroseconds(100); // Small delay to prevent busy-waiting
     }
 
-    // Send in chunks of 14, but only up to 19186 (last valid starting index)
-    for (uint32_t i = 0; i <= 19186; i += 14) {
-      chunk.pixel_index = i;
-      for (int j = 0; j < 14; j++) {
-        if (i + j < 19200) chunk.pixels[j] = raw_pixels[i + j];
+    // Send image header with size info
+    ImageHeader header;
+    header.total_size = fb->len;
+    header.chunk_count = (fb->len + 27) / 28; // Ceiling division
+    
+    bool headerSent = false;
+    int headerRetries = 0;
+    while (!headerSent && headerRetries < 10) {
+      radio.stopListening();
+      delayMicroseconds(50);
+      radio.write(&header, sizeof(ImageHeader));
+      
+      radio.startListening();
+      delayMicroseconds(50);
+      unsigned long ackTimeout = millis();
+      while (millis() - ackTimeout < 15) {
+        if (radio.available()) {
+          uint8_t ack;
+          radio.read(&ack, sizeof(uint8_t));
+          if (ack == TUAH_BYTE) {
+            headerSent = true;
+            break;
+          }
+        }
       }
+      if (!headerSent) headerRetries++;
+    }
+    
+    if (!headerSent) {
+      Serial.println("Failed to send header");
+      esp_camera_fb_return(fb);
+      return;
+    }
+
+    // Send JPEG data in chunks of 28 bytes
+    uint8_t* jpeg_data = fb->buf;
+    IndexedChunk chunk;
+    
+    for (uint32_t i = 0; i < header.chunk_count; i++) {
+      chunk.chunk_index = i;
+      uint32_t byte_offset = i * 28;
+      uint32_t bytes_remaining = fb->len - byte_offset;
+      uint32_t bytes_to_send = (bytes_remaining < 28) ? bytes_remaining : 28;
+      
+      // Copy JPEG bytes into chunk
+      memcpy(chunk.data, &jpeg_data[byte_offset], bytes_to_send);
+      if (bytes_to_send < 28) {
+        memset(&chunk.data[bytes_to_send], 0, 28 - bytes_to_send); // Pad remaining
+      }
+      
       // Send chunk and wait for ACK
       bool ackReceived = false;
       int retries = 0;
       while (!ackReceived && retries < 10) {
         radio.stopListening();
-        delayMicroseconds(50); // Allow mode switch to settle
+        delayMicroseconds(50);
         bool sent = radio.write(&chunk, sizeof(IndexedChunk));
         
-        // Wait for ACK
         radio.startListening();
-        delayMicroseconds(50); // Allow mode switch to settle
+        delayMicroseconds(50);
         unsigned long ackTimeout = millis();
-        while (millis() - ackTimeout < 15) {  // Increased to 15ms to match receiver
+        while (millis() - ackTimeout < 15) {
           if (radio.available()) {
             uint8_t ack;
             radio.read(&ack, sizeof(uint8_t));

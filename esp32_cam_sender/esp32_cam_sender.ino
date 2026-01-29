@@ -23,7 +23,7 @@
 
 #define TRIG_PIN 4  
 #define ECHO_PIN 16 
-#define THRESHOLD_CM 30
+#define THRESHOLD_CM 300
 
 long getDistance() {
   pinMode(TRIG_PIN, OUTPUT);
@@ -43,11 +43,21 @@ long getDistance() {
 }
 
 RF24 radio(2, 15); 
-const byte address[] = "00001";
+const byte senderAddress[] = "00001";  // Address for sending data
+const byte receiverAddress[] = "00002"; // Address for receiving polls
 
+// Poll packet with keys to prevent false triggers
+struct PollPacket {
+  uint8_t key1;    // 0xAA
+  uint8_t key2;    // 0x55
+  uint8_t node_id;   // Target node
+  uint8_t key3;    // 0xCC
+};
+
+//image details
 struct ImageHeader {
-  uint32_t total_size;  // Total JPEG size in bytes
-  uint32_t chunk_count; // Number of chunks to expect
+  uint32_t total_size;  
+  uint32_t chunk_count; 
 };
 
 struct IndexedChunk {
@@ -55,7 +65,7 @@ struct IndexedChunk {
   uint8_t data[28];     // JPEG byte data (increased from 14 uint16_t)
 }; 
 
-#define TUAH_BYTE 0xAA  // Acknowledgment signal
+// #define TUAH_BYTE 0xAA  // Acknowledgment signal
 
 //there are 2 different camera modules. Each module has a register(ID num) 
 const uint8_t node_id = 2;
@@ -86,26 +96,30 @@ void setup() {
   config.fb_location = CAMERA_FB_IN_DRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
+  //camera settings
   esp_camera_init(&config);
   sensor_t * s = esp_camera_sensor_get();
   s->set_vflip(s, 1); 
   s->set_brightness(s, 0);     
   s->set_contrast(s, 0);       
-  s->set_saturation(s, -1);    // Lower saturation helps with color "bleeding"
-  s->set_whitebal(s, 1);       // Enable Auto White Balance
+  s->set_saturation(s, -1);    
+  s->set_whitebal(s, 1);       
   s->set_awb_gain(s, 1);       
-  s->set_exposure_ctrl(s, 1);  // Enable Auto Exposure
-  s->set_aec2(s, 1);           // Enable DSP Auto Exposure
-  s->set_gain_ctrl(s, 1);      // Enable Auto Gain
+  s->set_exposure_ctrl(s, 1);  
+  s->set_aec2(s, 1);           
+  s->set_gain_ctrl(s, 1);      
 
+  //nrf24l01 settings
   SPI.begin(14, 12, 13, 15);
   radio.begin();
-  radio.setAutoAck(false);
+  radio.setAutoAck(true);
+  radio.enableDynamicPayloads();
+  radio.setRetries(15, 15);
   radio.setChannel(115);
-  radio.setDataRate(RF24_2MBPS);
-  radio.setPALevel(RF24_PA_LOW);
-  radio.openWritingPipe(address);
-  radio.openReadingPipe(1, address);  // For receiving poll requests
+  radio.setDataRate(RF24_1MBPS);
+  radio.setPALevel(RF24_PA_HIGH);
+  radio.openWritingPipe(senderAddress);      // Write to receiver on senderAddress
+  radio.openReadingPipe(1, receiverAddress); // Listen for polls on receiverAddress
   radio.stopListening();
   Serial.println("Sender Ready.");
 }
@@ -116,8 +130,7 @@ void loop() {
   if (distance > 0 && distance < THRESHOLD_CM) {
 
     pinMode(16, INPUT); // Release the pin immediately
-    delay(50);         // Wait for electrical noise to settle
-
+    delay(10);         // Wait for electrical noise to settle
 
     //take 2 captures for some fucking reason then discard the first one idk
     camera_fb_t * fb = NULL;
@@ -130,7 +143,6 @@ void loop() {
 
     Serial.printf("Captured JPEG: %d bytes\n", fb->len);
     
-    // Warn if JPEG is too large for reliable transmission
     if (fb->len > 20000) {
       Serial.println("WARNING: JPEG too large, may be unreliable!");
     }
@@ -140,105 +152,93 @@ void loop() {
     radio.flush_rx();
 
     //wait to recieve the register request from the reciever
-    uint8_t incoming_id;
+    PollPacket poll;
     Serial.println("Waiting for receiver...");
-    radio.startListening();  // Switch to RX mode to receive poll once
-    while(true){
+    radio.startListening();  
+    
+    unsigned long pollStartTime = millis();
+    bool gotPolled = false;
+    
+    while(millis() - pollStartTime < 10000) {  // 10 second timeout
       if(radio.available()){
-        radio.read(&incoming_id, sizeof(uint8_t));
-        if(incoming_id == node_id){
-          //reciever is ready to recieve data
-          radio.stopListening();  // Switch to TX mode
-          delayMicroseconds(100); // Allow mode switch to settle
-          radio.write(&node_id, sizeof(uint8_t)); //send back the register to confirm
-          Serial.println("Receiver ready, sending data...");
-          break;
+        uint8_t payloadSize = radio.getDynamicPayloadSize();
+        
+        if(payloadSize == sizeof(PollPacket)) {
+          radio.read(&poll, sizeof(PollPacket));
+          
+          if(poll.key1 == 0xAA && poll.key2 == 0x55 && 
+             poll.key3 == 0xCC && poll.node_id == node_id) {
+
+            radio.stopListening(); 
+            delayMicroseconds(100); 
+            
+            // Confirm with same structure
+            PollPacket response = {0xAA, 0x55, node_id, 0xCC};
+            radio.write(&response, sizeof(PollPacket));
+            Serial.println("Receiver ready, sending data...");
+            gotPolled = true;
+            break;
+          }
         }
+        // If wrong size or invalid packet, flush and keep listening
+        radio.flush_rx();
       }
-      delayMicroseconds(100); // Small delay to prevent busy-waiting
+      delayMicroseconds(100); //prevent busy-waiting
+    }
+    
+    // abort if timed out
+    if(!gotPolled) {
+      Serial.println("Timeout waiting for poll, aborting...");
+      esp_camera_fb_return(fb);
+      radio.stopListening();
+      radio.flush_tx();
+      radio.flush_rx();
+      return;
     }
 
     // Send image header with size info
     ImageHeader header;
     header.total_size = fb->len;
-    header.chunk_count = (fb->len + 27) / 28; // Ceiling division
+    header.chunk_count = (fb->len + 27) / 28; 
     
     bool headerSent = false;
     int headerRetries = 0;
     while (!headerSent && headerRetries < 10) {
-      radio.stopListening();
-      delayMicroseconds(50);
-      radio.write(&header, sizeof(ImageHeader));
-      
-      radio.startListening();
-      delayMicroseconds(50);
-      unsigned long ackTimeout = millis();
-      while (millis() - ackTimeout < 15) {
-        if (radio.available()) {
-          uint8_t ack;
-          radio.read(&ack, sizeof(uint8_t));
-          if (ack == TUAH_BYTE) {
-            headerSent = true;
-            break;
-          }
-        }
-      }
-      if (!headerSent) headerRetries++;
-    }
-    
-    if (!headerSent) {
-      Serial.println("Failed to send header");
-      esp_camera_fb_return(fb);
-      return;
-    }
+      ImageHeader header;
+      header.total_size = fb->len;
+      header.chunk_count = (fb->len + 27) / 28;
 
+      // Use Hardware Auto-ACK only (much more reliable)
+      radio.stopListening();
+      if (!radio.write(&header, sizeof(ImageHeader))) {
+          Serial.println("Failed to send header (Hardware ACK missing)");
+          esp_camera_fb_return(fb);
+          return; // Skip this frame and try again next loop
+      }
+      Serial.println("Header sent successfully.");
+      headerSent = true;
+    }
+  
     // Send JPEG data in chunks of 28 bytes
     uint8_t* jpeg_data = fb->buf;
     IndexedChunk chunk;
-    
+
     for (uint32_t i = 0; i < header.chunk_count; i++) {
       chunk.chunk_index = i;
       uint32_t byte_offset = i * 28;
       uint32_t bytes_remaining = fb->len - byte_offset;
       uint32_t bytes_to_send = (bytes_remaining < 28) ? bytes_remaining : 28;
-      
-      // Copy JPEG bytes into chunk
+
       memcpy(chunk.data, &jpeg_data[byte_offset], bytes_to_send);
+        
+      // Zero padding if needed
       if (bytes_to_send < 28) {
-        memset(&chunk.data[bytes_to_send], 0, 28 - bytes_to_send); // Pad remaining
+          memset(&chunk.data[bytes_to_send], 0, 28 - bytes_to_send);
       }
-      
-      // Send chunk and wait for ACK
-      bool ackReceived = false;
-      int retries = 0;
-      while (!ackReceived && retries < 10) {
-        radio.stopListening();
-        delayMicroseconds(50);
-        bool sent = radio.write(&chunk, sizeof(IndexedChunk));
-        
-        radio.startListening();
-        delayMicroseconds(50);
-        unsigned long ackTimeout = millis();
-        while (millis() - ackTimeout < 15) {
-          if (radio.available()) {
-            uint8_t ack;
-            radio.read(&ack, sizeof(uint8_t));
-            if (ack == TUAH_BYTE) {
-              ackReceived = true;
-              break;
-            }
-          }
-        }
-        
-        if (!ackReceived) {
-          retries++;
-          Serial.printf("Retry %d for chunk %d\n", retries, i);
-          delayMicroseconds(500);
-        }
-      }
-      
-      if (!ackReceived) {
-        Serial.printf("Failed to send chunk %d after 10 retries\n", i);
+
+      if (!radio.write(&chunk, sizeof(IndexedChunk))) {
+        Serial.printf("Failed to send chunk %d (Hardware Auto-Retry failed)\n", i);
+        delay(5); // Optional: Add a small software delay or break if connection is truly lost
       }
     }
       esp_camera_fb_return(fb);
@@ -247,7 +247,7 @@ void loop() {
       // Flush any stale data and reset to clean state
       radio.flush_tx();
       radio.flush_rx();
-      radio.stopListening(); // Ensure we're in TX mode for next poll
+      radio.stopListening(); 
       
       delay(200); // Give receiver time to process and upload
   }

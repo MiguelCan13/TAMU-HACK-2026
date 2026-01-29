@@ -10,14 +10,16 @@
 
 const char* ssid = "SM-G950U7AD";
 const char* password = "361 658 6872";
-const char* flaskServerUrl = "http://10.124.30.48:5000/upload"; 
+const char* flaskServerUrl = "http://10.38.40.48:5000/upload"; 
 
 RF24 radio(9, 10); 
-const byte address[] = "00001";
+const byte senderAddress[] = "00001";   // Address to receive data from sender
+const byte receiverAddress[] = "00002";  // Address to send polls to sender
 
+//image settings 
 struct ImageHeader {
-  uint32_t total_size;  // Total JPEG size in bytes
-  uint32_t chunk_count; // Number of chunks to expect
+  uint32_t total_size;  
+  uint32_t chunk_count; 
 };
 
 struct IndexedChunk {
@@ -29,13 +31,17 @@ uint8_t jpeg_buffer[65536]; // 64KB buffer for JPEG (adjust if needed)
 ImageHeader current_header;
 bool chunk_received[3000]; // Track which chunks we've received
 
-struct Node{
-  uint8_t id;
+// Poll packet with magic bytes to prevent false triggers
+struct PollPacket {
+  uint8_t key1;    // 0xAA
+  uint8_t key2;    // 0x55
+  uint8_t node_id;   // Target node
+  uint8_t key3;    // 0xCC
 };
 
 uint8_t nodes[] = {1, 2};
 
-#define TUAH_BYTE 0xAA  
+// #define TUAH_BYTE 0xAA  
 
 unsigned long lastPacketTime = 0;
 bool hasNewData = false;
@@ -67,7 +73,6 @@ const SettingsItem_t lots[] = {
     {"Lot: 102", 118},
     {"Lot: 97", 492}
 };
-
 
 #define ITEM_COUNT (sizeof(lots) / sizeof(lots[0]))
 int current_idx = 0;
@@ -124,22 +129,17 @@ void uploadToFlask() {
         String response = http.getString();
         Serial.println("[SERVER RESPONSE] " + response);
         
-        // Example: Parse simple JSON response (you can add ArduinoJson for complex parsing)
+        //parse response
         int index = response.indexOf("\"validation\":");
         int num_cars = 0;
-        if (index != -1) { // -1 means the word wasn't found
-            // 2. Move the index past the length of "validation":
-            // The string "\"validation\":" is 13 characters long.
+        if (index != -1) { 
             index += 13; 
-
-            // 3. Extract the substring from that point forward
             String valStr = response.substring(index);
-
-            // 4. Convert that string to an actual integer
             num_cars = valStr.toInt();
 
         }
 
+        //change lot occupancy based on response
         switch (num_cars){
             case 0:
             break;
@@ -175,7 +175,7 @@ void my_disp_flush( lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *colo
     lv_disp_flush_ready( disp );
 }
 
-//not using touch
+//not using touch, kept so lvgl doesnt complain
 void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
 {
     uint16_t touchX = 0, touchY = 0;
@@ -204,7 +204,7 @@ void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
 
 void setup()
 {
-    Serial.begin( 115200 ); /* prepare for possible serial debug */
+    Serial.begin( 115200 ); 
 
     encoder.attachHalfQuad(45, 48); // CLK, DT
     pinMode(47, INPUT_PULLUP);     // SW
@@ -221,22 +221,21 @@ void setup()
     lv_log_register_print_cb( my_print ); /* register print function for debugging */
 #endif
 
-    tft.begin();          /* TFT init */
-    tft.setRotation( 3 ); /* Landscape orientation, flipped */
+    tft.begin();          
+    tft.setRotation( 3 ); // Landscape orientation, flipped
 
     lv_disp_draw_buf_init( &draw_buf, buf, NULL, screenWidth * screenHeight / 10 );
 
-    /*Initialize the display*/
+    //Initialize the display driver
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init( &disp_drv );
-    /*Change the following line to your display resolution*/
     disp_drv.hor_res = screenWidth;
     disp_drv.ver_res = screenHeight;
     disp_drv.flush_cb = my_disp_flush;
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register( &disp_drv );
 
-    /*Initialize the (dummy) input device driver*/
+    //Initialize the (dummy) input device driver
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init( &indev_drv );
     indev_drv.type = LV_INDEV_TYPE_POINTER;
@@ -250,12 +249,14 @@ void setup()
     Serial.println("\n[WIFI] Connected.");
 
     radio.begin();
-    radio.setAutoAck(false);
+    radio.setAutoAck(true);
+    radio.enableDynamicPayloads();
+    radio.setRetries(15, 15);
     radio.setChannel(115);
-    radio.setDataRate(RF24_2MBPS);
-    radio.setPALevel(RF24_PA_LOW);   
-    radio.openWritingPipe(address);      // For sending poll requests
-    radio.openReadingPipe(1, address);   // For receiving data
+    radio.setDataRate(RF24_1MBPS);
+    radio.setPALevel(RF24_PA_HIGH);   
+    radio.openWritingPipe(receiverAddress);   // Send polls to sender on receiverAddress
+    radio.openReadingPipe(1, senderAddress);  // Receive data from sender on senderAddress
     radio.startListening();
 
 
@@ -341,7 +342,7 @@ void update_capacity() {
 }
 
 void handle_image_process() {
-    uint8_t identity = 0;
+    PollPacket response;
     bool nodeFound = false;
 
     // 1. Poll the nodes to see who is ready
@@ -351,23 +352,34 @@ void handle_image_process() {
     //and if the node recieves its register back it will send data, otherwise it will wait.
 
     //check to see which node is ready to send data
+    Serial.println("[DEBUG] Polling nodes...");
     for (int i = 0; i < sizeof(nodes); i++) {
         radio.stopListening();
-        delayMicroseconds(50); // Allow mode switch to settle
-        uint8_t targetNode = nodes[i];
-        radio.write(&targetNode, sizeof(uint8_t)); // Send poll [cite: 67]
+        delayMicroseconds(100); 
+        
+        // Send poll packet with KEYSSSSS bytes
+        PollPacket poll = {0xAA, 0x55, nodes[i], 0xCC};
+        bool writeSuccess = radio.write(&poll, sizeof(PollPacket));
+        Serial.printf("[DEBUG] Polling node %d... Write success: %d\n", nodes[i], writeSuccess);
         
         radio.startListening();
-        delayMicroseconds(50); // Allow mode switch to settle
+        delayMicroseconds(100); 
         unsigned long startWait = millis();
-        while (millis() - startWait < 15) { // 15ms window to hear back [cite: 69]
+        while (millis() - startWait < 50) { // 50ms window to hear back 
         if (radio.available()) {
-            radio.read(&identity, sizeof(uint8_t));
-            if (identity == targetNode) {
-            nodeFound = true;
-            Serial.printf("[SYSTEM] Node %d is ready.\n", targetNode); 
-            node_id = targetNode;
-            break;
+            uint8_t payloadSize = radio.getDynamicPayloadSize();
+            if(payloadSize == sizeof(PollPacket)) {
+                radio.read(&response, sizeof(PollPacket));
+                // Validate
+                if (response.key1 == 0xAA && response.key2 == 0x55 && 
+                    response.key3 == 0xCC && response.node_id == nodes[i]) {
+                    nodeFound = true;
+                    Serial.printf("[SYSTEM] Node %d is ready.\n", nodes[i]); 
+                    node_id = nodes[i];
+                    break;
+                }
+            } else {
+                radio.flush_rx(); // Wrong size, clear it
             }
         }
         }
@@ -379,25 +391,15 @@ void handle_image_process() {
         lastPacketTime = millis();
         hasNewData = true;
         
-        // Clear any stale data and ensure clean state
         radio.flush_rx();
         
-        // First, receive the image header
-        bool headerReceived = false;
+        bool headerReceived = false; //header
         unsigned long headerTimeout = millis();
         while (millis() - headerTimeout < 200) {
             if (radio.available()) {
                 radio.read(&current_header, sizeof(ImageHeader));
-                Serial.printf("[HEADER] Size: %d bytes, Chunks: %d\n", 
-                             current_header.total_size, current_header.chunk_count);
                 
-                // Send ACK for header
-                radio.stopListening();
-                delayMicroseconds(50);
-                uint8_t ack = TUAH_BYTE;
-                radio.write(&ack, sizeof(uint8_t));
-                radio.startListening();
-                delayMicroseconds(50);
+                Serial.printf("[HEADER] Size: %d bytes, Chunks: %d\n", current_header.total_size, current_header.chunk_count);
                 
                 headerReceived = true;
                 lastPacketTime = millis();
@@ -415,57 +417,34 @@ void handle_image_process() {
         uint32_t chunksReceived = 0;
         uint32_t lastChunkIndex = 0;
         
+
         while (chunksReceived < current_header.chunk_count) {
             if (radio.available()) {
                 IndexedChunk incoming;
-                radio.read(&incoming, sizeof(IndexedChunk));
+                radio.read(&incoming, sizeof(IndexedChunk)); 
                 
-                // Validate chunk index
-                if (incoming.chunk_index >= current_header.chunk_count) {
-                    Serial.printf("[ERROR] Invalid chunk index: %d\n", incoming.chunk_index);
-                    continue;
-                }
+                // Validate index
+                if (incoming.chunk_index >= current_header.chunk_count) continue;
                 
-                // Check for duplicate
+                // Duplicate check (Hardware retries might cause duplicates if ACK is lost)
                 if (chunk_received[incoming.chunk_index]) {
-                    Serial.printf("[WARN] Duplicate chunk: %d\n", incoming.chunk_index);
-                    // Still send ACK
-                    radio.stopListening();
-                    delayMicroseconds(50);
-                    uint8_t ack = TUAH_BYTE;
-                    radio.write(&ack, sizeof(uint8_t));
-                    radio.startListening();
-                    delayMicroseconds(50);
-                    continue;
+                    continue; // Already have its
                 }
-                
-                // Copy chunk data into JPEG buffer
+
+                // Copy data
                 uint32_t byte_offset = incoming.chunk_index * 28;
-                uint32_t bytes_remaining = current_header.total_size - byte_offset;
-                uint32_t bytes_to_copy = (bytes_remaining < 28) ? bytes_remaining : 28;
-                
-                // Boundary check
-                if (byte_offset + bytes_to_copy > sizeof(jpeg_buffer)) {
-                    Serial.printf("[ERROR] Buffer overflow at chunk %d\n", incoming.chunk_index);
-                    break;
+                uint32_t bytes_to_copy = (current_header.total_size - byte_offset < 28) ? 
+                                        (current_header.total_size - byte_offset) : 28;
+                                        
+                if (byte_offset + bytes_to_copy <= sizeof(jpeg_buffer)) {
+                    memcpy(&jpeg_buffer[byte_offset], incoming.data, bytes_to_copy);
+                    chunk_received[incoming.chunk_index] = true;
+                    chunksReceived++;
+                    lastPacketTime = millis();
                 }
-                
-                memcpy(&jpeg_buffer[byte_offset], incoming.data, bytes_to_copy);
-                chunk_received[incoming.chunk_index] = true;
-                chunksReceived++;
-                lastPacketTime = millis();
-                
-                // Send ACK back to sender
-                radio.stopListening();
-                delayMicroseconds(50);
-                uint8_t ack = TUAH_BYTE;
-                radio.write(&ack, sizeof(uint8_t));
-                radio.startListening();
-                delayMicroseconds(50);
             }
             
-            // Safety exit if sender stops mid-frame
-            if (millis() - lastPacketTime > 200) break;
+            if (millis() - lastPacketTime > 500) break; 
         }
         
         // Check for missing chunks
@@ -483,14 +462,13 @@ void handle_image_process() {
         }
     }
 
-    // 3. Gap detection for upload [cite: 77, 78]
+    // 3. Gap detection for upload
     if (hasNewData && (millis() - lastPacketTime > 100)) {
         uploadToFlask();
         hasNewData = false;
         
-        // Reset radio to clean state
-        radio.flush_rx(); // Clear any stale packets
-        radio.startListening(); // Ensure we're listening for next poll
+        radio.flush_rx(); 
+        radio.startListening(); 
     }
 }
 
